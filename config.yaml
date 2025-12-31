@@ -1,0 +1,25 @@
+credentials:
+  usernames:
+    admin:
+      name: 관리자
+      password: $2b$12$lsUJcMAWB71IWbeHVlyYSe9bOz8.4cUhpWsDIB/vthM2tXRGFHekK
+      email: admin@healse.com
+      role: admin
+      companies:
+        - ALL
+    shinwoo:
+      name: 신우중공업 담당자
+      password: $2b$12$PK6/PoDi3Kkgu97qmnENSOd/xHPHHx/6auvHJCYgiRQ/4zxNwo0sG
+      email: safety@shinwoo.com
+      role: user
+      companies:
+        - 신우중공업_인벤토리
+
+cookie:
+  expiry_days: 30
+  key: chemical_inventory_secret_key_2025
+  name: chemical_inventory_cookie
+
+preauthorized:
+  emails:
+    - admin@healse.com

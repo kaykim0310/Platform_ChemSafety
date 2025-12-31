@@ -236,20 +236,33 @@ INVENTORY_COLUMNS = [
 ]
 
 def load_inventory(company_name):
-    """사업장 인벤토리 로드"""
+    """사업장 인벤토리 로드 (Windows 호환)"""
     file_path = DATA_DIR / f"{company_name}.xlsx"
     if file_path.exists():
-        df = pd.read_excel(file_path, sheet_name=0)
-        # 배출량 컬럼이 없으면 추가
-        for col in INVENTORY_COLUMNS:
-            if col not in df.columns:
-                df[col] = None
-        return df
+        try:
+            # 파일을 바이트로 읽어서 메모리에서 처리 (파일 핸들 즉시 해제)
+            with open(file_path, 'rb') as f:
+                file_bytes = io.BytesIO(f.read())
+            df = pd.read_excel(file_bytes, sheet_name=0, engine='openpyxl')
+            file_bytes.close()
+            
+            # 배출량 컬럼이 없으면 추가
+            for col in INVENTORY_COLUMNS:
+                if col not in df.columns:
+                    df[col] = None
+            return df
+        except Exception as e:
+            st.error(f"파일 로드 오류: {str(e)}")
+            return None
     return None
 
 def load_inventory_from_upload(uploaded_file):
     """업로드된 인벤토리 파일 로드 (기존 서식)"""
-    df = pd.read_excel(uploaded_file, sheet_name=0, header=None, skiprows=2)
+    # BytesIO로 변환해서 처리
+    file_bytes = io.BytesIO(uploaded_file.read())
+    df = pd.read_excel(file_bytes, sheet_name=0, header=None, skiprows=2, engine='openpyxl')
+    file_bytes.close()
+    
     # 기존 23개 컬럼
     base_columns = [
         '공정명', '제품명', '화학물질명', '관용명/이명', 'CAS No', '함유량(%)',
@@ -270,9 +283,31 @@ def load_inventory_from_upload(uploaded_file):
     return df
 
 def save_inventory(company_name, df):
-    """사업장 인벤토리 저장"""
+    """사업장 인벤토리 저장 (Windows 호환)"""
     file_path = DATA_DIR / f"{company_name}.xlsx"
-    df.to_excel(file_path, index=False)
+    try:
+        import gc
+        import time
+        gc.collect()
+        time.sleep(0.2)
+        
+        # 먼저 BytesIO에 저장
+        output = io.BytesIO()
+        df.to_excel(output, index=False, engine='openpyxl')
+        output.seek(0)
+        
+        # 파일로 쓰기
+        with open(file_path, 'wb') as f:
+            f.write(output.getvalue())
+        output.close()
+        
+        return True
+    except PermissionError:
+        st.error("❌ 파일이 사용 중입니다. 엑셀에서 파일을 닫고 다시 시도해주세요.")
+        return False
+    except Exception as e:
+        st.error(f"❌ 저장 오류: {str(e)}")
+        return False
 
 def get_cmr_count(df):
     count = 0
@@ -691,7 +726,9 @@ def show_main_app():
                     results_list = []
                     
                     try:
-                        xls = pd.ExcelFile(uploaded_emission)
+                        # BytesIO로 읽어서 처리 (파일 핸들 이슈 방지)
+                        file_bytes = io.BytesIO(uploaded_emission.read())
+                        xls = pd.ExcelFile(file_bytes, engine='openpyxl')
                         
                         # Tier 1 (TMS)
                         if '1_TMS_Data' in xls.sheet_names:
@@ -721,6 +758,10 @@ def show_main_app():
                             val = calc.calculate_emission_factor(df_factor)
                             results_list.append({"구분": "Tier 4 (배출계수)", "설명": "활동량 × 계수", "배출량(kg)": val})
                             total_emission += val
+                        
+                        # 파일 닫기
+                        xls.close()
+                        file_bytes.close()
 
                         # 결과 출력
                         st.subheader("📊 산정 결과 리포트")
@@ -813,12 +854,48 @@ def show_main_app():
             
             delete_company = st.selectbox("삭제할 사업장 선택", companies)
             
-            if st.button("🗑️ 삭제", type="secondary"):
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                delete_clicked = st.button("🗑️ 삭제", type="secondary")
+            with col2:
+                st.caption("⚠️ 삭제 전 해당 파일이 다른 프로그램(엑셀 등)에서 열려있지 않은지 확인하세요.")
+            
+            if delete_clicked:
                 file_path = DATA_DIR / f"{delete_company}.xlsx"
                 if file_path.exists():
-                    file_path.unlink()
-                    st.success(f"'{delete_company}'가 삭제되었습니다.")
-                    st.rerun()
+                    # 메모리 정리 강화
+                    import gc
+                    import time
+                    gc.collect()
+                    time.sleep(0.5)  # 잠시 대기
+                    gc.collect()
+                    
+                    # 삭제 시도 (최대 3회)
+                    deleted = False
+                    for attempt in range(3):
+                        try:
+                            import os
+                            os.remove(str(file_path))
+                            deleted = True
+                            break
+                        except PermissionError:
+                            gc.collect()
+                            time.sleep(0.5)
+                        except Exception as e:
+                            st.error(f"❌ 삭제 오류: {str(e)}")
+                            break
+                    
+                    if deleted:
+                        st.success(f"✅ '{delete_company}'가 삭제되었습니다.")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("❌ 파일 삭제에 실패했습니다. 다음을 확인해주세요:")
+                        st.markdown("""
+                        1. 해당 엑셀 파일이 다른 프로그램에서 열려있지 않은지 확인
+                        2. Streamlit 앱을 완전히 종료 후 재시작
+                        3. 수동으로 `data/companies/` 폴더에서 파일 삭제
+                        """)
         else:
             st.info("등록된 사업장이 없습니다. 데이터를 업로드해주세요.")
     

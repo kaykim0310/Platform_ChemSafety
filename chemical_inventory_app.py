@@ -239,18 +239,15 @@ def get_all_companies():
 # ============================================
 # 데이터 관리 함수
 # ============================================
-# 인벤토리 컬럼 정의 (기존 23개 + 배출량 7개 + KOSHA 3개)
+# 실제 서식 컬럼 (23개)
 INVENTORY_COLUMNS = [
-    '공정명', '제품명', '화학물질명', '관용명/이명', 'CAS No', '함유량(%)',
-    '발암성', '변이성', '생식독성', '노출기준(TWA)',
-    '작업환경측정', '특수건강진단', '관리대상유해물질', '특별관리물질',
-    '기존', '유독', '사고대비', '제한/금지/허가', '중점', '잔류',
-    '함량 및 규제정보', '등록대상기존화학물질', '기존물질여부',
-    # 배출량 관련 컬럼
-    '연간취급량(kg)', '대기배출량(kg/년)', '수계배출량(kg/년)', 
-    '폐기물이동량(kg/년)', '배출산정방법', '산정기준일', 'PRTR대상여부',
-    # KOSHA 조회 관련 컬럼
-    'KOSHA조회상태', 'KOSHA조회일'
+    '공정명', '단위작업장소', '제품명', '물질명', 'CAS_No', 
+    'TWA', 'STEL',
+    '작업환경측정', '특수건강진단', '관리대상유해물질', '특별관리물질', '허용기준대상', 'PSM대상',
+    '배출량조사대상', 'PRTR그룹', 'PRTR기준량',
+    'IARC', 'ACGIH_발암성', '고용노동부_발암성',
+    '화관법', '화평법', '위험물',
+    '조회상태'
 ]
 
 def load_inventory(company_name):
@@ -263,6 +260,13 @@ def load_inventory(company_name):
             df = pd.read_excel(file_bytes, sheet_name=0, engine='openpyxl')
             file_bytes.close()
             
+            # 빈 행 제거 (CAS_No 기준)
+            if 'CAS_No' in df.columns:
+                df = df.dropna(subset=['CAS_No'])
+            
+            # 인덱스 1부터 시작
+            df.index = range(1, len(df) + 1)
+            
             for col in INVENTORY_COLUMNS:
                 if col not in df.columns:
                     df[col] = None
@@ -273,21 +277,19 @@ def load_inventory(company_name):
     return None
 
 def load_inventory_from_upload(uploaded_file):
-    """업로드된 인벤토리 파일 로드 (기존 서식)"""
+    """업로드된 인벤토리 파일 로드"""
     file_bytes = io.BytesIO(uploaded_file.read())
-    df = pd.read_excel(file_bytes, sheet_name=0, header=None, skiprows=2, engine='openpyxl')
+    df = pd.read_excel(file_bytes, sheet_name=0, engine='openpyxl')
     file_bytes.close()
     
-    base_columns = [
-        '공정명', '제품명', '화학물질명', '관용명/이명', 'CAS No', '함유량(%)',
-        '발암성', '변이성', '생식독성', '노출기준(TWA)',
-        '작업환경측정', '특수건강진단', '관리대상유해물질', '특별관리물질',
-        '기존', '유독', '사고대비', '제한/금지/허가', '중점', '잔류',
-        '함량 및 규제정보', '등록대상기존화학물질', '기존물질여부'
-    ]
-    df.columns = base_columns
+    # 빈 행 제거
+    if 'CAS_No' in df.columns:
+        df = df.dropna(subset=['CAS_No'])
     
-    # 추가 컬럼
+    # 인덱스 1부터 시작
+    df.index = range(1, len(df) + 1)
+    
+    # 필수 컬럼 추가
     for col in INVENTORY_COLUMNS:
         if col not in df.columns:
             df[col] = None
@@ -320,9 +322,9 @@ def save_inventory(company_name, df):
 
 def get_cmr_count(df):
     count = 0
-    for col in ['발암성', '변이성', '생식독성']:
+    for col in ['IARC', 'ACGIH_발암성', '고용노동부_발암성']:
         if col in df.columns:
-            count += df[col].apply(lambda x: str(x) not in ['자료없음', 'nan', '', 'NaN', 'X']).sum()
+            count += df[col].apply(lambda x: str(x) not in ['자료없음', 'nan', '', 'NaN', 'X', '-']).sum()
     return count
 
 def get_measurement_target_count(df):
@@ -336,8 +338,8 @@ def get_health_exam_target_count(df):
     return 0
 
 def get_prtr_count(df):
-    if 'PRTR대상여부' in df.columns:
-        return df['PRTR대상여부'].apply(lambda x: str(x) == 'Y' or str(x) == 'O').sum()
+    if '배출량조사대상' in df.columns:
+        return df['배출량조사대상'].apply(lambda x: str(x) == 'O').sum()
     return 0
 
 def get_total_emission(df):
@@ -347,8 +349,8 @@ def get_total_emission(df):
 
 def get_kosha_queried_count(df):
     """KOSHA 조회 완료 물질 수"""
-    if 'KOSHA조회상태' in df.columns:
-        return df['KOSHA조회상태'].apply(lambda x: str(x) == '성공').sum()
+    if '조회상태' in df.columns:
+        return df['조회상태'].apply(lambda x: str(x) == '성공').sum()
     return 0
 
 # ============================================
@@ -512,8 +514,8 @@ def show_main_app():
                 # 화학물질 목록
                 st.divider()
                 st.subheader("📝 화학물질 목록 (상위 10건)")
-                display_cols = ['공정명', '제품명', '화학물질명', 'CAS No', '노출기준(TWA)', 
-                               '작업환경측정', '특수건강진단', 'KOSHA조회상태']
+                display_cols = ['공정명', '제품명', '물질명', 'CAS_No', 'TWA', 
+                               '작업환경측정', '특수건강진단', '조회상태']
                 available_cols = [col for col in display_cols if col in df.columns]
                 st.dataframe(df[available_cols].head(10), use_container_width=True)
             else:
@@ -553,8 +555,8 @@ def show_main_app():
                 
                 if search_term:
                     mask = (
-                        filtered_df['화학물질명'].astype(str).str.contains(search_term, case=False, na=False) |
-                        filtered_df['CAS No'].astype(str).str.contains(search_term, case=False, na=False)
+                        filtered_df['물질명'].astype(str).str.contains(search_term, case=False, na=False) |
+                        filtered_df['CAS_No'].astype(str).str.contains(search_term, case=False, na=False)
                     )
                     filtered_df = filtered_df[mask]
                 
@@ -566,17 +568,18 @@ def show_main_app():
                 if "특수건강진단 대상" in filter_options:
                     filtered_df = filtered_df[filtered_df['특수건강진단'].astype(str).str.contains('O', na=False)]
                 if "PRTR 대상" in filter_options:
-                    filtered_df = filtered_df[filtered_df['PRTR대상여부'].astype(str).isin(['Y', 'O'])]
+                    filtered_df = filtered_df[filtered_df['배출량조사대상'].astype(str) == 'O']
                 if "KOSHA 미조회" in filter_options:
-                    filtered_df = filtered_df[filtered_df['KOSHA조회상태'].astype(str) != '성공']
+                    filtered_df = filtered_df[filtered_df['조회상태'].astype(str) != '성공']
                 
                 st.info(f"검색 결과: **{len(filtered_df)}건** / 전체 {len(df)}건")
                 
                 display_cols = st.multiselect(
                     "표시할 컬럼",
                     df.columns.tolist(),
-                    default=['공정명', '제품명', '화학물질명', 'CAS No', '함유량(%)', '노출기준(TWA)', 
-                             '작업환경측정', '특수건강진단', '관리대상유해물질', '특별관리물질', 'KOSHA조회상태']
+                    default=['공정명', '단위작업장소', '제품명', '물질명', 'CAS_No', 'TWA', 'STEL',
+                             '작업환경측정', '특수건강진단', '관리대상유해물질', '특별관리물질', 
+                             '배출량조사대상', 'PRTR그룹', '조회상태']
                 )
                 
                 if display_cols:
@@ -692,9 +695,9 @@ def show_main_app():
                 df = load_inventory(selected_company)
                 
                 if df is not None and len(df) > 0:
-                    if 'CAS No' in df.columns:
+                    if 'CAS_No' in df.columns:
                         # CAS 번호 목록 추출
-                        cas_list = df['CAS No'].dropna().unique().tolist()
+                        cas_list = df['CAS_No'].dropna().unique().tolist()
                         cas_list = [c for c in cas_list if str(c).strip() and '-' in str(c)]
                         
                         col1, col2, col3 = st.columns(3)
@@ -723,31 +726,34 @@ def show_main_app():
                                 result = get_chemical_info(cas_no)
                                 
                                 # 해당 CAS 번호의 모든 행 업데이트
-                                mask = df['CAS No'].astype(str).str.strip() == str(cas_no).strip()
+                                mask = df['CAS_No'].astype(str).str.strip() == str(cas_no).strip()
                                 
                                 if result['success']:
-                                    # 기존 컬럼에 맞춰 업데이트
-                                    df.loc[mask, '화학물질명'] = result['화학물질명']
-                                    df.loc[mask, '노출기준(TWA)'] = result['노출기준(TWA)']
-                                    df.loc[mask, '발암성'] = result['발암성']
-                                    df.loc[mask, '변이성'] = result['변이성']
-                                    df.loc[mask, '생식독성'] = result['생식독성']
+                                    # 실제 서식 컬럼명에 맞춰 업데이트
+                                    df.loc[mask, '물질명'] = result['물질명']
+                                    df.loc[mask, 'TWA'] = result['TWA']
+                                    df.loc[mask, 'STEL'] = result['STEL']
                                     df.loc[mask, '작업환경측정'] = result['작업환경측정']
                                     df.loc[mask, '특수건강진단'] = result['특수건강진단']
                                     df.loc[mask, '관리대상유해물질'] = result['관리대상유해물질']
                                     df.loc[mask, '특별관리물질'] = result['특별관리물질']
-                                    df.loc[mask, '유독'] = result['유독']
-                                    df.loc[mask, '사고대비'] = result['사고대비']
-                                    df.loc[mask, '제한/금지/허가'] = result['제한/금지/허가']
-                                    df.loc[mask, 'PRTR대상여부'] = result['PRTR대상']
-                                    df.loc[mask, 'KOSHA조회상태'] = '성공'
-                                    df.loc[mask, 'KOSHA조회일'] = datetime.now().strftime('%Y-%m-%d')
+                                    df.loc[mask, '허용기준대상'] = result['허용기준대상']
+                                    df.loc[mask, 'PSM대상'] = result['PSM대상']
+                                    df.loc[mask, '배출량조사대상'] = result['배출량조사대상']
+                                    df.loc[mask, 'PRTR그룹'] = result['PRTR그룹']
+                                    df.loc[mask, 'PRTR기준량'] = result['PRTR기준량']
+                                    df.loc[mask, 'IARC'] = result['IARC']
+                                    df.loc[mask, 'ACGIH_발암성'] = result['ACGIH_발암성']
+                                    df.loc[mask, '고용노동부_발암성'] = result['고용노동부_발암성']
+                                    df.loc[mask, '화관법'] = result['화관법']
+                                    df.loc[mask, '화평법'] = result['화평법']
+                                    df.loc[mask, '위험물'] = result['위험물']
+                                    df.loc[mask, '조회상태'] = '성공'
                                     
-                                    logs.append(f"✅ {cas_no}: {result['화학물질명']}")
+                                    logs.append(f"✅ {cas_no}: {result['물질명']}")
                                     success_count += 1
                                 else:
-                                    df.loc[mask, 'KOSHA조회상태'] = '실패'
-                                    df.loc[mask, 'KOSHA조회일'] = datetime.now().strftime('%Y-%m-%d')
+                                    df.loc[mask, '조회상태'] = '실패'
                                     logs.append(f"❌ {cas_no}: 미등록")
                                 
                                 progress_bar.progress((idx + 1) / len(cas_list))
@@ -762,7 +768,7 @@ def show_main_app():
                             else:
                                 st.error("저장 실패")
                     else:
-                        st.warning("'CAS No' 컬럼이 없습니다.")
+                        st.warning("'CAS_No' 컬럼이 없습니다.")
                 else:
                     st.warning("인벤토리 데이터가 없습니다.")
             else:
@@ -788,14 +794,14 @@ def show_main_app():
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        chemical_options = df['화학물질명'].dropna().unique().tolist()
+                        chemical_options = df['물질명'].dropna().unique().tolist()
                         if chemical_options:
                             selected_chemical = st.selectbox("화학물질 선택", chemical_options)
-                            chem_row = df[df['화학물질명'] == selected_chemical].iloc[0]
+                            chem_row = df[df['물질명'] == selected_chemical].iloc[0]
                             st.markdown(f"""
-                            **CAS No:** {chem_row.get('CAS No', '-')}  
-                            **현재 취급량:** {chem_row.get('연간취급량(kg)', '미입력')} kg  
-                            **현재 배출량:** {chem_row.get('대기배출량(kg/년)', '미산정')} kg/년
+                            **CAS No:** {chem_row.get('CAS_No', '-')}  
+                            **TWA:** {chem_row.get('TWA', '-')}  
+                            **배출량조사대상:** {chem_row.get('배출량조사대상', '-')}
                             """)
                         else:
                             selected_chemical = None
@@ -820,17 +826,7 @@ def show_main_app():
                             if st.button("🧮 계산", key="calc_mass"):
                                 emission = calc.calculate_simple_mass_balance(input_amt, recovery_amt, destruction_amt)
                                 st.success(f"**대기배출량: {emission:,.2f} kg/년**")
-                                
-                                if st.button("💾 저장", key="save_mass"):
-                                    idx = df[df['화학물질명'] == selected_chemical].index[0]
-                                    df.at[idx, '연간취급량(kg)'] = input_amt
-                                    df.at[idx, '대기배출량(kg/년)'] = emission
-                                    df.at[idx, '배출산정방법'] = '물질수지법'
-                                    df.at[idx, '산정기준일'] = datetime.now().strftime('%Y-%m-%d')
-                                    df.at[idx, 'PRTR대상여부'] = 'Y' if input_amt >= 1000 else 'N'
-                                    save_inventory(selected_company, df)
-                                    st.success("✅ 저장!")
-                                    st.rerun()
+                                st.info("💡 배출량 컬럼이 필요하면 서식에 추가 후 저장 기능을 활성화하세요.")
                         else:
                             st.markdown("#### 📊 배출계수법")
                             col1, col2, col3 = st.columns(3)

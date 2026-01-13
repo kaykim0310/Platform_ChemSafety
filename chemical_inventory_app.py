@@ -7,6 +7,14 @@ from pathlib import Path
 from yaml.loader import SafeLoader
 from datetime import datetime
 
+# KOSHA API 모듈 import (선택적)
+try:
+    from kosha_api import get_chemical_info, batch_query, check_prtr
+    KOSHA_AVAILABLE = True
+except ImportError:
+    KOSHA_AVAILABLE = False
+    print("⚠️ kosha_api.py 모듈 없음. KOSHA 조회 기능 비활성화.")
+
 # ============================================
 # 페이지 설정
 # ============================================
@@ -46,6 +54,18 @@ st.markdown("""
         border: 1px solid #86efac;
         margin: 1rem 0;
     }
+    .kosha-badge {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        background: #dcfce7;
+        color: #166534;
+        border-radius: 1rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-left: 0.5rem;
+    }
+    .reg-o { color: #16a34a; font-weight: bold; }
+    .reg-x { color: #9ca3af; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -124,7 +144,6 @@ def generate_emission_template():
     """배출량 산정용 엑셀 템플릿 생성"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # 1. TMS Data
         pd.DataFrame({
             '측정일시': ['2024-01-01 10:00'],
             '오염물질명': ['NOx'],
@@ -135,7 +154,6 @@ def generate_emission_template():
             '상태코드': [0]
         }).to_excel(writer, sheet_name='1_TMS_Data', index=False)
         
-        # 2. Self Measurement
         pd.DataFrame({
             '측정기간(월/분기)': ['1월'],
             '오염물질명': ['Dust'],
@@ -144,7 +162,6 @@ def generate_emission_template():
             '실제조업시간(hr)': [720]
         }).to_excel(writer, sheet_name='2_Self_Measurement', index=False)
         
-        # 3. Mass Balance
         pd.DataFrame({
             '관리기간': ['1분기'],
             '사용물질명': ['Toluene'],
@@ -153,7 +170,6 @@ def generate_emission_template():
             '파괴량(kg)': [500]
         }).to_excel(writer, sheet_name='3_Mass_Balance', index=False)
         
-        # 4. Emission Factor
         pd.DataFrame({
             '시설명': ['보일러 1호기'],
             '활동량(단위)': [15000],
@@ -223,30 +239,30 @@ def get_all_companies():
 # ============================================
 # 데이터 관리 함수
 # ============================================
-# 인벤토리 컬럼 정의 (기존 + 배출량)
+# 인벤토리 컬럼 정의 (기존 23개 + 배출량 7개 + KOSHA 3개)
 INVENTORY_COLUMNS = [
     '공정명', '제품명', '화학물질명', '관용명/이명', 'CAS No', '함유량(%)',
     '발암성', '변이성', '생식독성', '노출기준(TWA)',
     '작업환경측정', '특수건강진단', '관리대상유해물질', '특별관리물질',
     '기존', '유독', '사고대비', '제한/금지/허가', '중점', '잔류',
     '함량 및 규제정보', '등록대상기존화학물질', '기존물질여부',
-    # 배출량 관련 컬럼 (추가)
+    # 배출량 관련 컬럼
     '연간취급량(kg)', '대기배출량(kg/년)', '수계배출량(kg/년)', 
-    '폐기물이동량(kg/년)', '배출산정방법', '산정기준일', 'PRTR대상여부'
+    '폐기물이동량(kg/년)', '배출산정방법', '산정기준일', 'PRTR대상여부',
+    # KOSHA 조회 관련 컬럼
+    'KOSHA조회상태', 'KOSHA조회일'
 ]
 
 def load_inventory(company_name):
-    """사업장 인벤토리 로드 (Windows 호환)"""
+    """사업장 인벤토리 로드"""
     file_path = DATA_DIR / f"{company_name}.xlsx"
     if file_path.exists():
         try:
-            # 파일을 바이트로 읽어서 메모리에서 처리 (파일 핸들 즉시 해제)
             with open(file_path, 'rb') as f:
                 file_bytes = io.BytesIO(f.read())
             df = pd.read_excel(file_bytes, sheet_name=0, engine='openpyxl')
             file_bytes.close()
             
-            # 배출량 컬럼이 없으면 추가
             for col in INVENTORY_COLUMNS:
                 if col not in df.columns:
                     df[col] = None
@@ -258,12 +274,10 @@ def load_inventory(company_name):
 
 def load_inventory_from_upload(uploaded_file):
     """업로드된 인벤토리 파일 로드 (기존 서식)"""
-    # BytesIO로 변환해서 처리
     file_bytes = io.BytesIO(uploaded_file.read())
     df = pd.read_excel(file_bytes, sheet_name=0, header=None, skiprows=2, engine='openpyxl')
     file_bytes.close()
     
-    # 기존 23개 컬럼
     base_columns = [
         '공정명', '제품명', '화학물질명', '관용명/이명', 'CAS No', '함유량(%)',
         '발암성', '변이성', '생식독성', '노출기준(TWA)',
@@ -272,18 +286,15 @@ def load_inventory_from_upload(uploaded_file):
         '함량 및 규제정보', '등록대상기존화학물질', '기존물질여부'
     ]
     df.columns = base_columns
-    # 배출량 컬럼 추가
-    df['연간취급량(kg)'] = None
-    df['대기배출량(kg/년)'] = None
-    df['수계배출량(kg/년)'] = None
-    df['폐기물이동량(kg/년)'] = None
-    df['배출산정방법'] = None
-    df['산정기준일'] = None
-    df['PRTR대상여부'] = None
+    
+    # 추가 컬럼
+    for col in INVENTORY_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
     return df
 
 def save_inventory(company_name, df):
-    """사업장 인벤토리 저장 (Windows 호환)"""
+    """사업장 인벤토리 저장"""
     file_path = DATA_DIR / f"{company_name}.xlsx"
     try:
         import gc
@@ -291,12 +302,10 @@ def save_inventory(company_name, df):
         gc.collect()
         time.sleep(0.2)
         
-        # 먼저 BytesIO에 저장
         output = io.BytesIO()
         df.to_excel(output, index=False, engine='openpyxl')
         output.seek(0)
         
-        # 파일로 쓰기
         with open(file_path, 'wb') as f:
             f.write(output.getvalue())
         output.close()
@@ -327,15 +336,19 @@ def get_health_exam_target_count(df):
     return 0
 
 def get_prtr_count(df):
-    """PRTR 대상 물질 수"""
-    if '연간취급량(kg)' in df.columns:
-        return df['연간취급량(kg)'].apply(lambda x: float(x) >= 1000 if pd.notna(x) else False).sum()
+    if 'PRTR대상여부' in df.columns:
+        return df['PRTR대상여부'].apply(lambda x: str(x) == 'Y' or str(x) == 'O').sum()
     return 0
 
 def get_total_emission(df):
-    """총 배출량 합계"""
     if '대기배출량(kg/년)' in df.columns:
         return df['대기배출량(kg/년)'].apply(lambda x: float(x) if pd.notna(x) else 0).sum()
+    return 0
+
+def get_kosha_queried_count(df):
+    """KOSHA 조회 완료 물질 수"""
+    if 'KOSHA조회상태' in df.columns:
+        return df['KOSHA조회상태'].apply(lambda x: str(x) == '성공').sum()
     return 0
 
 # ============================================
@@ -354,6 +367,8 @@ def show_login():
     
     with col2:
         st.markdown("### 🧪 화학물질 관리 시스템")
+        if KOSHA_AVAILABLE:
+            st.markdown('<span class="kosha-badge">KOSHA API 연동</span>', unsafe_allow_html=True)
         st.markdown("---")
         
         with st.form("login_form"):
@@ -396,6 +411,9 @@ def show_main_app():
         st.image("https://img.icons8.com/color/96/000000/chemical-plant.png", width=60)
         st.title("화학물질 관리 시스템")
         
+        if KOSHA_AVAILABLE:
+            st.markdown('<span class="kosha-badge">KOSHA API</span>', unsafe_allow_html=True)
+        
         st.markdown(f"""
         <div class="user-info">
             👤 <strong>{user_info['name']}</strong><br>
@@ -410,19 +428,19 @@ def show_main_app():
         
         st.divider()
         
-        # 메뉴
+        # 메뉴 (🔍 KOSHA 조회 추가!)
         if is_admin:
-            menu = st.radio(
-                "메뉴",
-                ["🏠 대시보드", "📋 인벤토리 조회", "📊 배출량 산정", "📤 데이터 업로드", "🏢 사업장 관리", "👥 사용자 관리"],
-                label_visibility="collapsed"
-            )
+            menu_options = ["🏠 대시보드", "📋 인벤토리 조회"]
+            if KOSHA_AVAILABLE:
+                menu_options.append("🔍 KOSHA 조회")
+            menu_options.extend(["📊 배출량 산정", "📤 데이터 업로드", "🏢 사업장 관리", "👥 사용자 관리"])
         else:
-            menu = st.radio(
-                "메뉴",
-                ["🏠 대시보드", "📋 인벤토리 조회", "📊 배출량 산정"],
-                label_visibility="collapsed"
-            )
+            menu_options = ["🏠 대시보드", "📋 인벤토리 조회"]
+            if KOSHA_AVAILABLE:
+                menu_options.append("🔍 KOSHA 조회")
+            menu_options.append("📊 배출량 산정")
+        
+        menu = st.radio("메뉴", menu_options, label_visibility="collapsed")
         
         st.divider()
         
@@ -444,9 +462,8 @@ def show_main_app():
             df = load_inventory(selected_company)
             
             if df is not None and len(df) > 0:
-                # 주요 지표 (1행)
+                # 1행: 기본 지표
                 col1, col2, col3, col4 = st.columns(4)
-                
                 with col1:
                     st.metric(label="📦 등록 화학물질", value=f"{len(df)}종")
                 with col2:
@@ -456,27 +473,26 @@ def show_main_app():
                 with col4:
                     st.metric(label="🏥 특수건강진단 대상", value=f"{get_health_exam_target_count(df)}종")
                 
-                # 배출량 지표 (2행)
+                # 2행: 배출량 + KOSHA 지표
                 col1, col2, col3, col4 = st.columns(4)
-                
                 with col1:
-                    total_emission = get_total_emission(df)
-                    st.metric(label="🏭 총 대기배출량", value=f"{total_emission:,.1f} kg/년")
+                    st.metric(label="🏭 총 대기배출량", value=f"{get_total_emission(df):,.1f} kg/년")
                 with col2:
-                    prtr_count = get_prtr_count(df)
-                    st.metric(label="📋 PRTR 대상", value=f"{prtr_count}종")
+                    st.metric(label="📋 PRTR 대상", value=f"{get_prtr_count(df)}종")
                 with col3:
-                    emission_calculated = df['대기배출량(kg/년)'].notna().sum()
-                    st.metric(label="✅ 배출량 산정 완료", value=f"{emission_calculated}종")
+                    if KOSHA_AVAILABLE:
+                        st.metric(label="✅ KOSHA 조회완료", value=f"{get_kosha_queried_count(df)}종")
+                    else:
+                        emission_calculated = df['대기배출량(kg/년)'].notna().sum()
+                        st.metric(label="✅ 배출량 산정완료", value=f"{emission_calculated}종")
                 with col4:
-                    completion_rate = (emission_calculated / len(df) * 100) if len(df) > 0 else 0
-                    st.metric(label="📈 산정 완료율", value=f"{completion_rate:.0f}%")
+                    completion_rate = (get_kosha_queried_count(df) / len(df) * 100) if len(df) > 0 else 0
+                    st.metric(label="📈 조회 완료율", value=f"{completion_rate:.0f}%")
                 
                 st.divider()
                 
                 # 차트
                 col1, col2 = st.columns(2)
-                
                 with col1:
                     st.subheader("🏭 공정별 화학물질 현황")
                     if '공정명' in df.columns:
@@ -484,18 +500,20 @@ def show_main_app():
                         st.bar_chart(process_counts)
                 
                 with col2:
-                    st.subheader("📊 배출량 산정방법별 현황")
-                    if '배출산정방법' in df.columns:
-                        method_counts = df['배출산정방법'].value_counts()
-                        if not method_counts.empty:
-                            st.bar_chart(method_counts)
-                        else:
-                            st.info("아직 산정된 배출량이 없습니다.")
+                    st.subheader("📊 규제 현황")
+                    reg_data = {
+                        '작업환경측정': get_measurement_target_count(df),
+                        '특수건강진단': get_health_exam_target_count(df),
+                        'CMR물질': get_cmr_count(df),
+                        'PRTR대상': get_prtr_count(df)
+                    }
+                    st.bar_chart(pd.Series(reg_data))
                 
-                # 최근 등록 물질
+                # 화학물질 목록
                 st.divider()
                 st.subheader("📝 화학물질 목록 (상위 10건)")
-                display_cols = ['공정명', '제품명', '화학물질명', 'CAS No', '연간취급량(kg)', '대기배출량(kg/년)', '배출산정방법']
+                display_cols = ['공정명', '제품명', '화학물질명', 'CAS No', '노출기준(TWA)', 
+                               '작업환경측정', '특수건강진단', 'KOSHA조회상태']
                 available_cols = [col for col in display_cols if col in df.columns]
                 st.dataframe(df[available_cols].head(10), use_container_width=True)
             else:
@@ -527,7 +545,7 @@ def show_main_app():
                 with col3:
                     filter_options = st.multiselect(
                         "⚠️ 규제 필터",
-                        ["작업환경측정 대상", "특수건강진단 대상", "PRTR 대상", "배출량 미산정"],
+                        ["작업환경측정 대상", "특수건강진단 대상", "PRTR 대상", "KOSHA 미조회"],
                         default=[]
                     )
                 
@@ -548,9 +566,9 @@ def show_main_app():
                 if "특수건강진단 대상" in filter_options:
                     filtered_df = filtered_df[filtered_df['특수건강진단'].astype(str).str.contains('O', na=False)]
                 if "PRTR 대상" in filter_options:
-                    filtered_df = filtered_df[filtered_df['연간취급량(kg)'].apply(lambda x: float(x) >= 1000 if pd.notna(x) else False)]
-                if "배출량 미산정" in filter_options:
-                    filtered_df = filtered_df[filtered_df['대기배출량(kg/년)'].isna()]
+                    filtered_df = filtered_df[filtered_df['PRTR대상여부'].astype(str).isin(['Y', 'O'])]
+                if "KOSHA 미조회" in filter_options:
+                    filtered_df = filtered_df[filtered_df['KOSHA조회상태'].astype(str) != '성공']
                 
                 st.info(f"검색 결과: **{len(filtered_df)}건** / 전체 {len(df)}건")
                 
@@ -558,7 +576,7 @@ def show_main_app():
                     "표시할 컬럼",
                     df.columns.tolist(),
                     default=['공정명', '제품명', '화학물질명', 'CAS No', '함유량(%)', '노출기준(TWA)', 
-                             '작업환경측정', '특수건강진단', '연간취급량(kg)', '대기배출량(kg/년)', '배출산정방법']
+                             '작업환경측정', '특수건강진단', '관리대상유해물질', '특별관리물질', 'KOSHA조회상태']
                 )
                 
                 if display_cols:
@@ -586,6 +604,171 @@ def show_main_app():
             st.info("👈 사이드바에서 사업장을 선택해주세요.")
     
     # ============================================
+    # 🔍 KOSHA 조회 (신규 메뉴!)
+    # ============================================
+    elif menu == "🔍 KOSHA 조회" and KOSHA_AVAILABLE:
+        st.markdown('<p class="main-header">🔍 KOSHA API 조회</p>', unsafe_allow_html=True)
+        st.markdown('<p class="sub-header">CAS 번호로 화학물질 규제정보를 자동 조회합니다</p>', unsafe_allow_html=True)
+        
+        tab1, tab2 = st.tabs(["🔢 개별 조회", "📤 인벤토리 일괄 조회"])
+        
+        # ---- 탭 1: 개별 조회 ----
+        with tab1:
+            st.subheader("🔢 CAS 번호로 개별 조회")
+            
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                cas_input = st.text_input("CAS 번호 입력", placeholder="예: 67-64-1", key="single_cas")
+            with col2:
+                st.write("")
+                st.write("")
+                search_btn = st.button("🔍 조회", type="primary", key="single_search")
+            
+            if search_btn and cas_input:
+                with st.spinner(f"'{cas_input}' 조회 중..."):
+                    result = get_chemical_info(cas_input.strip())
+                
+                if result['success']:
+                    st.success(f"✅ 조회 성공: **{result['화학물질명']}**")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("#### 📌 기본 정보")
+                        st.markdown(f"""
+                        | 항목 | 값 |
+                        |------|-----|
+                        | **물질명** | {result['화학물질명']} |
+                        | **CAS No** | {result['CAS No']} |
+                        | **노출기준(TWA)** | {result['노출기준(TWA)']} |
+                        | **STEL** | {result.get('STEL', '-')} |
+                        """)
+                        
+                        st.markdown("#### 🧬 CMR 정보")
+                        st.markdown(f"""
+                        | 항목 | 분류 |
+                        |------|------|
+                        | **발암성** | {result['발암성']} |
+                        | **변이성** | {result['변이성']} |
+                        | **생식독성** | {result['생식독성']} |
+                        | **IARC** | {result['IARC']} |
+                        | **ACGIH** | {result['ACGIH']} |
+                        """)
+                    
+                    with col2:
+                        st.markdown("#### ⚖️ 산안법 규제")
+                        
+                        def badge(val):
+                            return '🟢 **O**' if val == 'O' else '⚪ X'
+                        
+                        st.markdown(f"""
+                        | 규제 | 해당 |
+                        |------|------|
+                        | **작업환경측정** | {badge(result['작업환경측정'])} |
+                        | **특수건강진단** | {badge(result['특수건강진단'])} |
+                        | **관리대상유해물질** | {badge(result['관리대상유해물질'])} |
+                        | **특별관리물질** | {badge(result['특별관리물질'])} |
+                        | **PRTR대상** | {badge(result['PRTR대상'])} ({result['PRTR그룹']}) |
+                        """)
+                        
+                        st.markdown("#### 📜 화관법/위험물")
+                        st.markdown(f"""
+                        | 항목 | 내용 |
+                        |------|------|
+                        | **유독물질** | {result['유독']} |
+                        | **사고대비물질** | {result['사고대비']} |
+                        | **제한/금지/허가** | {result['제한/금지/허가']} |
+                        | **위험물** | {result.get('위험물', '해당없음')} |
+                        """)
+                else:
+                    st.error(f"❌ 조회 실패: {result.get('error', '미등록 물질')}")
+        
+        # ---- 탭 2: 인벤토리 일괄 조회 ----
+        with tab2:
+            st.subheader("📤 인벤토리 일괄 조회")
+            st.markdown("등록된 인벤토리의 CAS 번호를 KOSHA API로 일괄 조회하여 규제정보를 자동으로 채웁니다.")
+            
+            if selected_company:
+                df = load_inventory(selected_company)
+                
+                if df is not None and len(df) > 0:
+                    if 'CAS No' in df.columns:
+                        # CAS 번호 목록 추출
+                        cas_list = df['CAS No'].dropna().unique().tolist()
+                        cas_list = [c for c in cas_list if str(c).strip() and '-' in str(c)]
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("📊 조회 대상", f"{len(cas_list)}개")
+                        with col2:
+                            already_done = get_kosha_queried_count(df)
+                            st.metric("✅ 조회 완료", f"{already_done}건")
+                        with col3:
+                            remaining = len(cas_list) - already_done
+                            st.metric("⏳ 미조회", f"{max(0, remaining)}건")
+                        
+                        st.divider()
+                        
+                        if st.button("🚀 일괄 조회 시작", type="primary", use_container_width=True):
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            log_container = st.container()
+                            
+                            logs = []
+                            success_count = 0
+                            
+                            for idx, cas_no in enumerate(cas_list):
+                                status_text.text(f"조회 중... [{idx+1}/{len(cas_list)}] {cas_no}")
+                                
+                                result = get_chemical_info(cas_no)
+                                
+                                # 해당 CAS 번호의 모든 행 업데이트
+                                mask = df['CAS No'].astype(str).str.strip() == str(cas_no).strip()
+                                
+                                if result['success']:
+                                    # 기존 컬럼에 맞춰 업데이트
+                                    df.loc[mask, '화학물질명'] = result['화학물질명']
+                                    df.loc[mask, '노출기준(TWA)'] = result['노출기준(TWA)']
+                                    df.loc[mask, '발암성'] = result['발암성']
+                                    df.loc[mask, '변이성'] = result['변이성']
+                                    df.loc[mask, '생식독성'] = result['생식독성']
+                                    df.loc[mask, '작업환경측정'] = result['작업환경측정']
+                                    df.loc[mask, '특수건강진단'] = result['특수건강진단']
+                                    df.loc[mask, '관리대상유해물질'] = result['관리대상유해물질']
+                                    df.loc[mask, '특별관리물질'] = result['특별관리물질']
+                                    df.loc[mask, '유독'] = result['유독']
+                                    df.loc[mask, '사고대비'] = result['사고대비']
+                                    df.loc[mask, '제한/금지/허가'] = result['제한/금지/허가']
+                                    df.loc[mask, 'PRTR대상여부'] = result['PRTR대상']
+                                    df.loc[mask, 'KOSHA조회상태'] = '성공'
+                                    df.loc[mask, 'KOSHA조회일'] = datetime.now().strftime('%Y-%m-%d')
+                                    
+                                    logs.append(f"✅ {cas_no}: {result['화학물질명']}")
+                                    success_count += 1
+                                else:
+                                    df.loc[mask, 'KOSHA조회상태'] = '실패'
+                                    df.loc[mask, 'KOSHA조회일'] = datetime.now().strftime('%Y-%m-%d')
+                                    logs.append(f"❌ {cas_no}: 미등록")
+                                
+                                progress_bar.progress((idx + 1) / len(cas_list))
+                                
+                                with log_container:
+                                    st.text_area("조회 로그", "\n".join(logs[-15:]), height=200, key=f"log_{idx}")
+                            
+                            # 저장
+                            if save_inventory(selected_company, df):
+                                st.success(f"🎉 조회 완료! **{success_count}/{len(cas_list)}건** 성공")
+                                st.balloons()
+                            else:
+                                st.error("저장 실패")
+                    else:
+                        st.warning("'CAS No' 컬럼이 없습니다.")
+                else:
+                    st.warning("인벤토리 데이터가 없습니다.")
+            else:
+                st.info("👈 사이드바에서 사업장을 선택해주세요.")
+    
+    # ============================================
     # 📊 배출량 산정
     # ============================================
     elif menu == "📊 배출량 산정":
@@ -596,9 +779,8 @@ def show_main_app():
             df = load_inventory(selected_company)
             calc = IntegratedEmissionCalculator()
             
-            tab1, tab2 = st.tabs(["🔢 개별 산정 (인벤토리 연동)", "📤 일괄 산정 (엑셀 업로드)"])
+            tab1, tab2 = st.tabs(["🔢 개별 산정", "📤 일괄 산정"])
             
-            # ---- 탭 1: 개별 산정 ----
             with tab1:
                 st.subheader("🔢 화학물질별 개별 산정")
                 
@@ -606,232 +788,110 @@ def show_main_app():
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        # 화학물질 선택
                         chemical_options = df['화학물질명'].dropna().unique().tolist()
-                        selected_chemical = st.selectbox("화학물질 선택", chemical_options)
-                        
-                        # 선택된 화학물질 정보
-                        chem_row = df[df['화학물질명'] == selected_chemical].iloc[0]
-                        st.markdown(f"""
-                        **CAS No:** {chem_row.get('CAS No', '-')}  
-                        **현재 취급량:** {chem_row.get('연간취급량(kg)', '미입력')} kg  
-                        **현재 배출량:** {chem_row.get('대기배출량(kg/년)', '미산정')} kg/년
-                        """)
+                        if chemical_options:
+                            selected_chemical = st.selectbox("화학물질 선택", chemical_options)
+                            chem_row = df[df['화학물질명'] == selected_chemical].iloc[0]
+                            st.markdown(f"""
+                            **CAS No:** {chem_row.get('CAS No', '-')}  
+                            **현재 취급량:** {chem_row.get('연간취급량(kg)', '미입력')} kg  
+                            **현재 배출량:** {chem_row.get('대기배출량(kg/년)', '미산정')} kg/년
+                            """)
+                        else:
+                            selected_chemical = None
+                            st.warning("화학물질이 없습니다.")
                     
                     with col2:
-                        # 산정방법 선택
-                        method = st.selectbox(
-                            "산정방법 선택",
-                            ["물질수지법 (Tier 3)", "배출계수법 (Tier 4)"]
-                        )
+                        method = st.selectbox("산정방법", ["물질수지법 (Tier 3)", "배출계수법 (Tier 4)"])
                     
-                    st.divider()
-                    
-                    # 물질수지법
-                    if "물질수지" in method:
-                        st.markdown("#### 📐 물질수지법 (투입량 - 회수량 - 파괴량)")
+                    if selected_chemical:
+                        st.divider()
                         
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            input_amt = st.number_input("투입량 (kg/년)", min_value=0.0, value=0.0, step=100.0)
-                        with col2:
-                            recovery_amt = st.number_input("회수량 (kg/년)", min_value=0.0, value=0.0, step=100.0)
-                        with col3:
-                            destruction_amt = st.number_input("파괴량 (kg/년)", min_value=0.0, value=0.0, step=100.0)
-                        
-                        if st.button("🧮 계산하기", key="calc_mass"):
-                            emission = calc.calculate_simple_mass_balance(input_amt, recovery_amt, destruction_amt)
+                        if "물질수지" in method:
+                            st.markdown("#### 📐 물질수지법")
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                input_amt = st.number_input("투입량 (kg/년)", min_value=0.0, value=0.0, step=100.0)
+                            with col2:
+                                recovery_amt = st.number_input("회수량 (kg/년)", min_value=0.0, value=0.0, step=100.0)
+                            with col3:
+                                destruction_amt = st.number_input("파괴량 (kg/년)", min_value=0.0, value=0.0, step=100.0)
                             
-                            st.markdown(f"""
-                            <div class="result-box">
-                                <h3>계산 결과</h3>
-                                <p><strong>대기배출량:</strong> {emission:,.2f} kg/년</p>
-                                <p><strong>산정방법:</strong> 물질수지법</p>
-                                <p><strong>계산식:</strong> {input_amt:,.0f} - {recovery_amt:,.0f} - {destruction_amt:,.0f} = {emission:,.2f}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
+                            if st.button("🧮 계산", key="calc_mass"):
+                                emission = calc.calculate_simple_mass_balance(input_amt, recovery_amt, destruction_amt)
+                                st.success(f"**대기배출량: {emission:,.2f} kg/년**")
+                                
+                                if st.button("💾 저장", key="save_mass"):
+                                    idx = df[df['화학물질명'] == selected_chemical].index[0]
+                                    df.at[idx, '연간취급량(kg)'] = input_amt
+                                    df.at[idx, '대기배출량(kg/년)'] = emission
+                                    df.at[idx, '배출산정방법'] = '물질수지법'
+                                    df.at[idx, '산정기준일'] = datetime.now().strftime('%Y-%m-%d')
+                                    df.at[idx, 'PRTR대상여부'] = 'Y' if input_amt >= 1000 else 'N'
+                                    save_inventory(selected_company, df)
+                                    st.success("✅ 저장!")
+                                    st.rerun()
+                        else:
+                            st.markdown("#### 📊 배출계수법")
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                activity_amt = st.number_input("활동량 (단위/년)", min_value=0.0, step=100.0)
+                            with col2:
+                                ef = st.number_input("배출계수 (kg/단위)", min_value=0.0, step=0.001, format="%.4f")
+                            with col3:
+                                efficiency = st.number_input("방지효율 (%)", min_value=0.0, max_value=100.0, step=1.0)
                             
-                            # 인벤토리 저장
-                            if st.button("💾 인벤토리에 저장", key="save_mass"):
-                                idx = df[df['화학물질명'] == selected_chemical].index[0]
-                                df.at[idx, '연간취급량(kg)'] = input_amt
-                                df.at[idx, '대기배출량(kg/년)'] = emission
-                                df.at[idx, '배출산정방법'] = '물질수지법'
-                                df.at[idx, '산정기준일'] = datetime.now().strftime('%Y-%m-%d')
-                                df.at[idx, 'PRTR대상여부'] = 'Y' if input_amt >= 1000 else 'N'
-                                save_inventory(selected_company, df)
-                                st.success("✅ 저장 완료!")
-                                st.rerun()
-                    
-                    # 배출계수법
-                    else:
-                        st.markdown("#### 📊 배출계수법 (활동량 × 배출계수 × (1-방지효율))")
-                        
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            activity_amt = st.number_input("활동량 (단위/년)", min_value=0.0, value=0.0, step=100.0)
-                        with col2:
-                            ef = st.number_input("배출계수 (kg/단위)", min_value=0.0, value=0.0, step=0.001, format="%.4f")
-                        with col3:
-                            efficiency = st.number_input("방지시설효율 (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
-                        
-                        if st.button("🧮 계산하기", key="calc_ef"):
-                            emission = calc.calculate_simple_emission_factor(activity_amt, ef, efficiency)
-                            
-                            st.markdown(f"""
-                            <div class="result-box">
-                                <h3>계산 결과</h3>
-                                <p><strong>대기배출량:</strong> {emission:,.2f} kg/년</p>
-                                <p><strong>산정방법:</strong> 배출계수법</p>
-                                <p><strong>계산식:</strong> {activity_amt:,.0f} × {ef:.4f} × (1 - {efficiency:.0f}/100) = {emission:,.2f}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            
-                            if st.button("💾 인벤토리에 저장", key="save_ef"):
-                                idx = df[df['화학물질명'] == selected_chemical].index[0]
-                                df.at[idx, '연간취급량(kg)'] = activity_amt
-                                df.at[idx, '대기배출량(kg/년)'] = emission
-                                df.at[idx, '배출산정방법'] = '배출계수법'
-                                df.at[idx, '산정기준일'] = datetime.now().strftime('%Y-%m-%d')
-                                df.at[idx, 'PRTR대상여부'] = 'Y' if activity_amt >= 1000 else 'N'
-                                save_inventory(selected_company, df)
-                                st.success("✅ 저장 완료!")
-                                st.rerun()
+                            if st.button("🧮 계산", key="calc_ef"):
+                                emission = calc.calculate_simple_emission_factor(activity_amt, ef, efficiency)
+                                st.success(f"**대기배출량: {emission:,.2f} kg/년**")
                 else:
-                    st.warning("인벤토리 데이터가 없습니다. 먼저 데이터를 업로드해주세요.")
+                    st.warning("인벤토리 데이터가 없습니다.")
             
-            # ---- 탭 2: 일괄 산정 ----
             with tab2:
                 st.subheader("📤 엑셀 일괄 산정")
-                st.markdown("통합환경법 4가지 산정방법(Tier 1~4)을 일괄 계산합니다.")
-                
-                # 템플릿 다운로드
                 template_data = generate_emission_template()
                 st.download_button(
-                    label="📥 산정용 엑셀 템플릿 다운로드",
+                    label="📥 템플릿 다운로드",
                     data=template_data,
-                    file_name='emission_calc_template.xlsx',
+                    file_name='emission_template.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                 )
-                
-                st.divider()
-                
-                # 파일 업로드
-                uploaded_emission = st.file_uploader("작성된 엑셀 파일 업로드", type=['xlsx'], key="emission_upload")
-                
-                if uploaded_emission:
-                    st.success("파일 분석을 시작합니다...")
-                    
-                    total_emission = 0.0
-                    results_list = []
-                    
-                    try:
-                        # BytesIO로 읽어서 처리 (파일 핸들 이슈 방지)
-                        file_bytes = io.BytesIO(uploaded_emission.read())
-                        xls = pd.ExcelFile(file_bytes, engine='openpyxl')
-                        
-                        # Tier 1 (TMS)
-                        if '1_TMS_Data' in xls.sheet_names:
-                            df_tms = pd.read_excel(xls, '1_TMS_Data').fillna(0)
-                            std_o2 = df_tms['표준산소농도(%)'].iloc[0] if not df_tms.empty else None
-                            val = calc.calculate_tms(df_tms, std_o2)
-                            results_list.append({"구분": "Tier 1 (TMS)", "설명": "실시간 자동 측정", "배출량(kg)": val})
-                            total_emission += val
-
-                        # Tier 2 (자가측정)
-                        if '2_Self_Measurement' in xls.sheet_names:
-                            df_self = pd.read_excel(xls, '2_Self_Measurement').fillna(0)
-                            val = calc.calculate_self_measurement(df_self)
-                            results_list.append({"구분": "Tier 2 (자가측정)", "설명": "수동 주기적 측정", "배출량(kg)": val})
-                            total_emission += val
-
-                        # Tier 3 (물질수지)
-                        if '3_Mass_Balance' in xls.sheet_names:
-                            df_mass = pd.read_excel(xls, '3_Mass_Balance').fillna(0)
-                            val = calc.calculate_mass_balance(df_mass)
-                            results_list.append({"구분": "Tier 3 (물질수지)", "설명": "투입-회수-파괴", "배출량(kg)": val})
-                            total_emission += val
-                            
-                        # Tier 4 (배출계수)
-                        if '4_Emission_Factor' in xls.sheet_names:
-                            df_factor = pd.read_excel(xls, '4_Emission_Factor').fillna(0)
-                            val = calc.calculate_emission_factor(df_factor)
-                            results_list.append({"구분": "Tier 4 (배출계수)", "설명": "활동량 × 계수", "배출량(kg)": val})
-                            total_emission += val
-                        
-                        # 파일 닫기
-                        xls.close()
-                        file_bytes.close()
-
-                        # 결과 출력
-                        st.subheader("📊 산정 결과 리포트")
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.metric(label="총 연간 배출량", value=f"{total_emission:,.2f} kg")
-                        with col2:
-                            st.info("각 산정 방식(Tier)별 합계입니다.")
-                            
-                        result_df = pd.DataFrame(results_list)
-                        result_df['배출량(kg)'] = result_df['배출량(kg)'].apply(lambda x: f"{x:,.2f}")
-                        st.table(result_df)
-                        
-                        if total_emission > 0:
-                            chart_df = pd.DataFrame(results_list).set_index("구분")
-                            st.bar_chart(chart_df['배출량(kg)'])
-
-                    except Exception as e:
-                        st.error(f"오류가 발생했습니다: {e}")
-                        st.warning("엑셀 파일의 시트 이름이나 컬럼명이 템플릿과 일치하는지 확인해주세요.")
         else:
             st.info("👈 사이드바에서 사업장을 선택해주세요.")
     
     # ============================================
-    # 📤 데이터 업로드 (관리자 전용)
+    # 📤 데이터 업로드 (관리자)
     # ============================================
     elif menu == "📤 데이터 업로드" and is_admin:
         st.markdown('<p class="main-header">📤 데이터 업로드</p>', unsafe_allow_html=True)
-        st.markdown('<p class="sub-header">엑셀 인벤토리 파일을 업로드하세요</p>', unsafe_allow_html=True)
         
         company_name = st.text_input("🏭 사업장명", placeholder="예: 신우중공업_인벤토리")
         
-        uploaded_file = st.file_uploader(
-            "엑셀 파일 선택",
-            type=['xlsx', 'xls'],
-            help="힐스 인벤토리 서식에 맞는 엑셀 파일을 업로드하세요"
-        )
+        uploaded_file = st.file_uploader("엑셀 파일 선택", type=['xlsx', 'xls'])
         
         if uploaded_file and company_name:
             try:
                 df = load_inventory_from_upload(uploaded_file)
-                
-                st.success(f"✅ 파일 로드 완료: {len(df)}개 화학물질")
-                
-                st.subheader("📋 데이터 미리보기")
+                st.success(f"✅ 로드 완료: {len(df)}개 화학물질")
                 st.dataframe(df.head(10), use_container_width=True)
                 
-                if st.button("💾 저장하기", type="primary"):
+                if st.button("💾 저장", type="primary"):
                     save_inventory(company_name, df)
-                    st.success(f"✅ '{company_name}' 인벤토리가 저장되었습니다!")
+                    st.success(f"✅ '{company_name}' 저장 완료!")
                     st.balloons()
-                    
             except Exception as e:
-                st.error(f"❌ 파일 처리 중 오류가 발생했습니다: {str(e)}")
-        
-        elif uploaded_file and not company_name:
-            st.warning("⚠️ 사업장명을 입력해주세요.")
+                st.error(f"오류: {str(e)}")
     
     # ============================================
-    # 🏢 사업장 관리 (관리자 전용)
+    # 🏢 사업장 관리 (관리자)
     # ============================================
     elif menu == "🏢 사업장 관리" and is_admin:
         st.markdown('<p class="main-header">🏢 사업장 관리</p>', unsafe_allow_html=True)
-        st.markdown('<p class="sub-header">등록된 사업장 목록을 관리하세요</p>', unsafe_allow_html=True)
         
         companies = get_all_companies()
         
         if companies:
-            st.info(f"총 **{len(companies)}개** 사업장이 등록되어 있습니다.")
+            st.info(f"총 **{len(companies)}개** 사업장")
             
             company_data = []
             for company in companies:
@@ -840,148 +900,34 @@ def show_main_app():
                     company_data.append({
                         "사업장명": company,
                         "화학물질 수": len(df),
-                        "작업환경측정 대상": get_measurement_target_count(df),
-                        "CMR 물질": get_cmr_count(df),
-                        "총 배출량(kg/년)": f"{get_total_emission(df):,.1f}",
-                        "PRTR 대상": get_prtr_count(df)
+                        "작업환경측정": get_measurement_target_count(df),
+                        "PRTR 대상": get_prtr_count(df),
+                        "KOSHA 조회완료": get_kosha_queried_count(df)
                     })
             
-            company_df = pd.DataFrame(company_data)
-            st.dataframe(company_df, use_container_width=True)
-            
-            st.divider()
-            st.subheader("🗑️ 사업장 삭제")
-            
-            delete_company = st.selectbox("삭제할 사업장 선택", companies)
-            
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                delete_clicked = st.button("🗑️ 삭제", type="secondary")
-            with col2:
-                st.caption("⚠️ 삭제 전 해당 파일이 다른 프로그램(엑셀 등)에서 열려있지 않은지 확인하세요.")
-            
-            if delete_clicked:
-                file_path = DATA_DIR / f"{delete_company}.xlsx"
-                if file_path.exists():
-                    # 메모리 정리 강화
-                    import gc
-                    import time
-                    gc.collect()
-                    time.sleep(0.5)  # 잠시 대기
-                    gc.collect()
-                    
-                    # 삭제 시도 (최대 3회)
-                    deleted = False
-                    for attempt in range(3):
-                        try:
-                            import os
-                            os.remove(str(file_path))
-                            deleted = True
-                            break
-                        except PermissionError:
-                            gc.collect()
-                            time.sleep(0.5)
-                        except Exception as e:
-                            st.error(f"❌ 삭제 오류: {str(e)}")
-                            break
-                    
-                    if deleted:
-                        st.success(f"✅ '{delete_company}'가 삭제되었습니다.")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error("❌ 파일 삭제에 실패했습니다. 다음을 확인해주세요:")
-                        st.markdown("""
-                        1. 해당 엑셀 파일이 다른 프로그램에서 열려있지 않은지 확인
-                        2. Streamlit 앱을 완전히 종료 후 재시작
-                        3. 수동으로 `data/companies/` 폴더에서 파일 삭제
-                        """)
+            st.dataframe(pd.DataFrame(company_data), use_container_width=True)
         else:
-            st.info("등록된 사업장이 없습니다. 데이터를 업로드해주세요.")
+            st.info("등록된 사업장이 없습니다.")
     
     # ============================================
-    # 👥 사용자 관리 (관리자 전용)
+    # 👥 사용자 관리 (관리자)
     # ============================================
     elif menu == "👥 사용자 관리" and is_admin:
         st.markdown('<p class="main-header">👥 사용자 관리</p>', unsafe_allow_html=True)
-        st.markdown('<p class="sub-header">시스템 사용자를 관리하세요</p>', unsafe_allow_html=True)
         
         config = load_config()
         users = config.get('credentials', {}).get('usernames', {})
-        
-        st.subheader("📋 등록된 사용자")
         
         user_data = []
         for username, info in users.items():
             user_data.append({
                 "아이디": username,
                 "이름": info.get('name', ''),
-                "이메일": info.get('email', ''),
-                "권한": "관리자" if info.get('role') == 'admin' else "사업장 담당자",
-                "접근 가능 사업장": ", ".join(info.get('companies', []))
+                "권한": "관리자" if info.get('role') == 'admin' else "담당자",
+                "사업장": ", ".join(info.get('companies', []))
             })
         
-        user_df = pd.DataFrame(user_data)
-        st.dataframe(user_df, use_container_width=True)
-        
-        st.divider()
-        
-        st.subheader("➕ 새 사용자 추가")
-        
-        with st.form("add_user_form"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                new_username = st.text_input("아이디", placeholder="영문 소문자")
-                new_name = st.text_input("이름", placeholder="홍길동")
-                new_email = st.text_input("이메일", placeholder="user@company.com")
-            
-            with col2:
-                new_password = st.text_input("비밀번호", type="password")
-                new_role = st.selectbox("권한", ["user", "admin"])
-                
-                all_companies = get_all_companies()
-                if new_role == "admin":
-                    new_companies = ["ALL"]
-                    st.info("관리자는 모든 사업장에 접근 가능합니다.")
-                else:
-                    new_companies = st.multiselect("접근 가능 사업장", all_companies)
-            
-            submit = st.form_submit_button("👤 사용자 추가", type="primary")
-            
-            if submit:
-                if new_username and new_name and new_password:
-                    if new_username in users:
-                        st.error("❌ 이미 존재하는 아이디입니다.")
-                    else:
-                        config['credentials']['usernames'][new_username] = {
-                            'name': new_name,
-                            'password': hash_password(new_password),
-                            'email': new_email,
-                            'role': new_role,
-                            'companies': new_companies if new_role != 'admin' else ['ALL']
-                        }
-                        save_config(config)
-                        st.success(f"✅ '{new_name}' 사용자가 추가되었습니다!")
-                        st.rerun()
-                else:
-                    st.warning("⚠️ 아이디, 이름, 비밀번호는 필수입니다.")
-        
-        st.divider()
-        
-        st.subheader("🗑️ 사용자 삭제")
-        
-        deletable_users = [u for u in users.keys() if u != 'admin']
-        if deletable_users:
-            delete_user = st.selectbox("삭제할 사용자", deletable_users)
-            
-            if st.button("🗑️ 사용자 삭제", type="secondary"):
-                del config['credentials']['usernames'][delete_user]
-                save_config(config)
-                st.success(f"'{delete_user}' 사용자가 삭제되었습니다.")
-                st.rerun()
-        else:
-            st.info("삭제 가능한 사용자가 없습니다. (관리자는 삭제 불가)")
+        st.dataframe(pd.DataFrame(user_data), use_container_width=True)
 
 # ============================================
 # 메인 실행

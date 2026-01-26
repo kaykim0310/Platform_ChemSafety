@@ -17,7 +17,7 @@ sys.path.insert(0, str(current_dir))
 
 # 모듈 import
 try:
-    from core.kosha_api import get_full_msds_data
+    from core.kosha_api import get_chemical_info
     from core.prtr_db import check_prtr_status
     KOSHA_AVAILABLE = True
 except ImportError:
@@ -61,12 +61,12 @@ if 'inventory' not in st.session_state:
 # ============================================
 # 유틸리티 함수
 # ============================================
-def get_chemical_info(cas_no):
+def query_chemical_info(cas_no):
     """CAS 번호로 화학물질 정보 조회 (KOSHA API)"""
     if not KOSHA_AVAILABLE:
         return None, "KOSHA 모듈 없음"
     try:
-        result = get_full_msds_data(cas_no)
+        result = get_chemical_info(cas_no)
         if result.get('success'):
             return result, None
         else:
@@ -75,7 +75,7 @@ def get_chemical_info(cas_no):
         return None, f"API 오류: {str(e)[:50]}"
 
 def create_inventory_item(process_name, unit_workplace, product_name, chem_name, alias, cas_no, content, kosha_data=None, prtr_status=None):
-    """인벤토리 항목 생성 - KOSHA API 15번에서 위험물 정보 추출"""
+    """인벤토리 항목 생성 - KOSHA API에서 규제정보+위험물 정보 추출"""
     item = {
         '공정명': process_name or '',
         '단위작업장소': unit_workplace or '',
@@ -100,39 +100,30 @@ def create_inventory_item(process_name, unit_workplace, product_name, chem_name,
     # KOSHA API 데이터 적용
     if kosha_data:
         # 물질명
-        item['화학물질명'] = kosha_data.get('name_kor', chem_name) or chem_name
+        item['화학물질명'] = kosha_data.get('name', chem_name) or chem_name
         
         # 8번 항목: 노출기준
-        exp = kosha_data.get('exposure_limits', {})
-        item['노출기준(TWA)'] = exp.get('TWA', '-')
+        item['노출기준(TWA)'] = kosha_data.get('twa', '-')
         
-        # 15번 항목: 법적규제현황 (산안법 + 위험물!)
-        regs = kosha_data.get('legal_regulations', {})
+        # 15번 항목: 산안법 규제
+        item['작업환경측정'] = kosha_data.get('measurement', 'X')
+        item['특수건강진단'] = kosha_data.get('healthCheck', 'X')
+        item['관리대상유해물질'] = kosha_data.get('managedHazard', 'X')
+        item['특별관리물질'] = kosha_data.get('specialManaged', 'X')
         
-        # 산안법
-        item['작업환경측정'] = regs.get('작업환경측정', 'X')
-        item['특수건강진단'] = regs.get('특수건강진단', 'X')
-        item['관리대상유해물질'] = regs.get('관리대상유해물질', 'X')
-        item['특별관리물질'] = regs.get('특별관리물질', 'X')
-        
-        # ⭐ 위험물안전관리법 (15번에서 추출!)
-        # 류별 + 품명 합쳐서 표시 (예: "제4류 제1석유류(비수용성)")
-        류별 = regs.get('위험물류별', '-')
-        품명 = regs.get('위험물품명', '-')
-        if 류별 != '-' and 품명 != '-':
-            item['위험물류별'] = f"{류별} {품명}"
-        elif 류별 != '-':
-            item['위험물류별'] = 류별
-        else:
-            item['위험물류별'] = '-'
-        item['지정수량'] = regs.get('지정수량', '-')
-        item['위험등급'] = regs.get('위험등급', '-')
+        # ⭐ 15번 항목: 위험물안전관리법
+        hazmat_class = kosha_data.get('hazmatClass', '-')
+        hazmat_name = kosha_data.get('hazmatName', '-')
+        if hazmat_class != '-' and hazmat_name != '-':
+            item['위험물류별'] = f"{hazmat_class} {hazmat_name}"
+        elif hazmat_class != '-':
+            item['위험물류별'] = hazmat_class
+        item['지정수량'] = kosha_data.get('hazmatQty', '-')
+        item['위험등급'] = kosha_data.get('hazmatGrade', '-')
         
         # 화관법
-        if regs.get('유독물질') == 'O':
-            item['유독'] = 'O'
-        if regs.get('사고대비물질') == 'O':
-            item['사고대비'] = 'O'
+        item['유독'] = kosha_data.get('toxic', 'X')
+        item['사고대비'] = kosha_data.get('accident', 'X')
     
     # PRTR 정보
     if prtr_status and prtr_status.get('대상여부') == 'O':
@@ -357,7 +348,7 @@ with tab1:
                     
                     if auto_query and KOSHA_AVAILABLE:
                         status.text(f"KOSHA 조회 중: {cas}...")
-                        kosha_data, _ = get_chemical_info(cas)
+                        kosha_data, _ = query_chemical_info(cas)
                         try:
                             prtr_status = check_prtr_status(cas)
                         except:
@@ -406,14 +397,14 @@ with tab2:
     if st.button("🔍 조회 및 등록", type="primary", use_container_width=True):
         if cas:
             with st.spinner("KOSHA API 조회 중..."):
-                kosha_data, err = get_chemical_info(cas.strip())
+                kosha_data, err = query_chemical_info(cas.strip())
                 try:
                     prtr_status = check_prtr_status(cas.strip())
                 except:
                     prtr_status = None
             
             if kosha_data:
-                item = create_inventory_item(process, unit_wp, product, kosha_data.get('name_kor',''), alias, cas.strip(), content, kosha_data, prtr_status)
+                item = create_inventory_item(process, unit_wp, product, kosha_data.get('name',''), alias, cas.strip(), content, kosha_data, prtr_status)
                 
                 if cas.strip() not in [i['CAS No'] for i in st.session_state.inventory]:
                     st.session_state.inventory.append(item)

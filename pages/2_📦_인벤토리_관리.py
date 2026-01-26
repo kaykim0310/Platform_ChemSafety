@@ -116,7 +116,15 @@ def create_inventory_item(process_name, unit_workplace, product_name, chem_name,
         item['특별관리물질'] = regs.get('특별관리물질', 'X')
         
         # ⭐ 위험물안전관리법 (15번에서 추출!)
-        item['위험물류별'] = regs.get('위험물류별', '-')
+        # 류별 + 품명 합쳐서 표시 (예: "제4류 제1석유류(비수용성)")
+        류별 = regs.get('위험물류별', '-')
+        품명 = regs.get('위험물품명', '-')
+        if 류별 != '-' and 품명 != '-':
+            item['위험물류별'] = f"{류별} {품명}"
+        elif 류별 != '-':
+            item['위험물류별'] = 류별
+        else:
+            item['위험물류별'] = '-'
         item['지정수량'] = regs.get('지정수량', '-')
         item['위험등급'] = regs.get('위험등급', '-')
         
@@ -232,7 +240,7 @@ def export_inventory_to_excel(inventory_data):
             if col_idx in [16, 17, 18] and val not in ['-', '', None]:
                 cell.fill = hazmat_fill
     
-    col_widths = {'A': 10, 'B': 12, 'C': 18, 'D': 18, 'E': 12, 'F': 12, 'G': 10, 'H': 10, 'I': 8, 'J': 8, 'K': 12, 'L': 10, 'M': 10, 'N': 12, 'O': 10, 'P': 18, 'Q': 10, 'R': 8, 'S': 6, 'T': 6, 'U': 8, 'V': 12, 'W': 6, 'X': 6, 'Y': 12, 'Z': 14}
+    col_widths = {'A': 10, 'B': 12, 'C': 18, 'D': 18, 'E': 12, 'F': 12, 'G': 10, 'H': 10, 'I': 8, 'J': 8, 'K': 12, 'L': 10, 'M': 10, 'N': 12, 'O': 10, 'P': 25, 'Q': 10, 'R': 8, 'S': 6, 'T': 6, 'U': 8, 'V': 12, 'W': 6, 'X': 6, 'Y': 12, 'Z': 14}
     for col, width in col_widths.items():
         ws.column_dimensions[col].width = width
     
@@ -433,41 +441,24 @@ with tab3:
     st.subheader("📋 인벤토리 목록")
     
     if st.session_state.inventory:
-        col1, col2, col3 = st.columns(3)
+        st.caption(f"총 {len(st.session_state.inventory)}종")
+        
+        display_cols = ['공정명', '단위작업장소', '제품명', 'CAS No', '화학물질명', '노출기준(TWA)', 
+                      '작업환경측정', '특수건강진단', '관리대상유해물질', 
+                      '위험물류별', '지정수량', '위험등급']
+        df = pd.DataFrame(st.session_state.inventory)
+        available_cols = [c for c in display_cols if c in df.columns]
+        st.dataframe(df[available_cols], use_container_width=True, height=500)
+        
+        st.divider()
+        col1, col2 = st.columns([3, 1])
         with col1:
-            f1 = st.checkbox("작업환경측정 대상만")
+            del_idx = st.selectbox("삭제할 물질", range(len(st.session_state.inventory)), 
+                                   format_func=lambda x: f"{st.session_state.inventory[x]['CAS No']} - {st.session_state.inventory[x]['화학물질명']}")
         with col2:
-            f2 = st.checkbox("특수건강진단 대상만")
-        with col3:
-            f3 = st.checkbox("위험물만")
-        
-        filtered = st.session_state.inventory.copy()
-        if f1:
-            filtered = [i for i in filtered if i.get('작업환경측정') == 'O']
-        if f2:
-            filtered = [i for i in filtered if i.get('특수건강진단') == 'O']
-        if f3:
-            filtered = [i for i in filtered if i.get('위험물류별', '-') != '-']
-        
-        st.caption(f"총 {len(filtered)}종")
-        
-        if filtered:
-            display_cols = ['공정명', '단위작업장소', '제품명', 'CAS No', '화학물질명', '노출기준(TWA)', 
-                          '작업환경측정', '특수건강진단', '관리대상유해물질', 
-                          '위험물류별', '지정수량', '위험등급']
-            df = pd.DataFrame(filtered)
-            available_cols = [c for c in display_cols if c in df.columns]
-            st.dataframe(df[available_cols], use_container_width=True, height=400)
-            
-            st.divider()
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                del_idx = st.selectbox("삭제할 물질", range(len(st.session_state.inventory)), 
-                                       format_func=lambda x: f"{st.session_state.inventory[x]['CAS No']} - {st.session_state.inventory[x]['화학물질명']}")
-            with col2:
-                if st.button("🗑️ 삭제"):
-                    st.session_state.inventory.pop(del_idx)
-                    st.rerun()
+            if st.button("🗑️ 삭제"):
+                st.session_state.inventory.pop(del_idx)
+                st.rerun()
     else:
         st.info("등록된 물질이 없습니다")
 

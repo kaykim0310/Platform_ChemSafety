@@ -1,309 +1,577 @@
 #!/usr/bin/env python3
 """
-KOSHA MSDS API 연동 모듈
-- CAS 번호로 화학물질 정보 조회
-- 8번 항목: 노출기준 (TWA, STEL)
-- 15번 항목: 법적규제현황 (산안법, 위험물안전관리법, 화관법)
+KOSHA MSDS API 연동 스크립트
+안전보건공단 화학물질정보시스템 Open API를 통해 MSDS 정보를 조회한다.
 """
+
 import requests
 import xml.etree.ElementTree as ET
+import argparse
+import json
 import time
-import re
+from typing import Optional, Dict, List, Any
 
+# ============================================================
 # API 설정
-API_KEY = "4f5a7bed-7e5d-4ac2-a714-c00e5d34f05d"
+# ============================================================
+API_KEY = "5002b52ede58ae3359d098a19d4e11ce7f88ffddc737233c2ebce75c033ff44a"
 BASE_URL = "https://msds.kosha.or.kr/openapi/service/msdschem"
-TIMEOUT = 15
+TIMEOUT = 30
+DELAY = 0.3  # API 호출 간격 (초)
 
 
-def search_by_cas(cas_no):
-    """CAS 번호로 화학물질 검색 → chemId 반환"""
-    url = f"{BASE_URL}/chemlist"
-    params = {
-        "serviceKey": API_KEY,
-        "searchCnd": "1",  # 1 = CAS 검색
+def set_api_key(key: str):
+    """API 키 설정"""
+    global API_KEY
+    API_KEY = key
+
+
+# ============================================================
+# 기본 API 호출 함수
+# ============================================================
+def _call_api(endpoint: str, params: Dict[str, Any]) -> Optional[ET.Element]:
+    """API 호출 후 XML 파싱하여 반환"""
+    url = f"{BASE_URL}/{endpoint}"
+    params["serviceKey"] = API_KEY
+    
+    try:
+        response = requests.get(url, params=params, timeout=TIMEOUT)
+        response.raise_for_status()
+        return ET.fromstring(response.content)
+    except requests.RequestException as e:
+        print(f"[ERROR] API 호출 실패: {e}")
+        return None
+    except ET.ParseError as e:
+        print(f"[ERROR] XML 파싱 실패: {e}")
+        return None
+
+
+def _get_text(element: Optional[ET.Element], tag: str) -> str:
+    """XML 요소에서 텍스트 추출"""
+    if element is None:
+        return ""
+    child = element.find(tag)
+    return child.text if child is not None and child.text else ""
+
+
+# ============================================================
+# 화학물질 검색
+# ============================================================
+def search_by_cas(cas_no: str) -> Dict[str, Any]:
+    """
+    CAS 번호로 화학물질 검색
+    
+    Args:
+        cas_no: CAS 번호 (예: "67-64-1")
+    
+    Returns:
+        {'success': True, 'chemId': '...', 'chemNameKor': '...', ...} 또는
+        {'success': False, 'error': '...'}
+    """
+    root = _call_api("chemlist", {
         "searchWrd": cas_no,
-        "numOfRows": "1"
-    }
+        "searchCnd": 1,  # CAS No 검색
+        "numOfRows": 10,
+        "pageNo": 1
+    })
     
-    try:
-        resp = requests.get(url, params=params, timeout=TIMEOUT)
-        root = ET.fromstring(resp.content)
-        
-        item = root.find(".//item")
-        if item is not None:
-            return {
-                "chemId": item.findtext("chemId", ""),
-                "chemNameKor": item.findtext("chemNameKor", ""),
-                "chemNameEng": item.findtext("chemNameEng", ""),
-                "casNo": item.findtext("casNo", ""),
-            }
-        return None
-    except Exception as e:
-        print(f"[KOSHA] 검색 오류: {e}")
-        return None
-
-
-def get_exposure_limits(chem_id):
-    """8번 항목 - 노출기준 조회"""
-    url = f"{BASE_URL}/chemdetail08"
-    params = {
-        "serviceKey": API_KEY,
-        "chemId": chem_id
-    }
+    if root is None:
+        return {"success": False, "error": "API 호출 실패"}
     
-    try:
-        resp = requests.get(url, params=params, timeout=TIMEOUT)
-        root = ET.fromstring(resp.content)
-        
-        item = root.find(".//item")
-        if item is not None:
-            # TWA, STEL 추출
-            twa = item.findtext("twaPpm", "") or item.findtext("twaMgm", "") or "-"
-            stel = item.findtext("stelPpm", "") or item.findtext("stelMgm", "") or "-"
-            
-            # 단위 포함
-            if twa and twa != "-":
-                if item.findtext("twaPpm"):
-                    twa = f"{twa}ppm"
-                elif item.findtext("twaMgm"):
-                    twa = f"{twa}mg/m³"
-            
-            if stel and stel != "-":
-                if item.findtext("stelPpm"):
-                    stel = f"{stel}ppm"
-                elif item.findtext("stelMgm"):
-                    stel = f"{stel}mg/m³"
-            
-            return {
-                "TWA": twa,
-                "STEL": stel,
-                "ceiling": item.findtext("ceilingPpm", "-") or "-"
-            }
-        return {"TWA": "-", "STEL": "-", "ceiling": "-"}
-    except Exception as e:
-        print(f"[KOSHA] 노출기준 조회 오류: {e}")
-        return {"TWA": "-", "STEL": "-", "ceiling": "-"}
+    items = root.findall(".//item")
+    if not items:
+        return {"success": False, "error": "물질 미등록"}
+    
+    item = items[0]
+    return {
+        "success": True,
+        "chemId": _get_text(item, "chemId"),
+        "chemNameKor": _get_text(item, "chemNameKor"),
+        "casNo": _get_text(item, "casNo"),
+        "keNo": _get_text(item, "keNo"),
+        "unNo": _get_text(item, "unNo"),
+        "enNo": _get_text(item, "enNo"),
+        "lastDate": _get_text(item, "lastDate")
+    }
 
 
-def get_legal_regulations(chem_id):
+def search_by_name(name: str) -> Dict[str, Any]:
     """
-    15번 항목 - 법적규제현황 조회
-    - 산업안전보건법: 작업환경측정, 특수건강진단, 관리대상유해물질, 특별관리물질
-    - 위험물안전관리법: 위험물류별, 지정수량, 위험등급
-    - 화학물질관리법: 유독물질, 사고대비물질
+    국문명으로 화학물질 검색
+    
+    Args:
+        name: 물질명 (예: "아세톤")
+    
+    Returns:
+        검색 결과 딕셔너리
     """
-    url = f"{BASE_URL}/chemdetail15"
-    params = {
-        "serviceKey": API_KEY,
-        "chemId": chem_id
-    }
+    root = _call_api("chemlist", {
+        "searchWrd": name,
+        "searchCnd": 0,  # 국문명 검색
+        "numOfRows": 10,
+        "pageNo": 1
+    })
     
-    result = {
-        # 산업안전보건법
-        "작업환경측정": "X",
-        "특수건강진단": "X",
-        "관리대상유해물질": "X",
-        "특별관리물질": "X",
-        "허용기준설정물질": "X",
-        # 위험물안전관리법
-        "위험물류별": "-",
-        "위험물품명": "-",
-        "지정수량": "-",
-        "위험등급": "-",
-        # 화학물질관리법
-        "유독물질": "X",
-        "사고대비물질": "X",
-        "제한물질": "X",
-        "금지물질": "X",
-    }
+    if root is None:
+        return {"success": False, "error": "API 호출 실패"}
     
-    try:
-        resp = requests.get(url, params=params, timeout=TIMEOUT)
-        text = resp.text
-        root = ET.fromstring(resp.content)
-        
-        # 모든 item 순회하며 파싱
-        for item in root.findall(".//item"):
-            # 법령명/조항 확인
-            law_name = item.findtext("lawName", "") or item.findtext("regulName", "") or ""
-            content = item.findtext("regulContent", "") or item.findtext("content", "") or ""
-            
-            law_name_lower = law_name.lower()
-            content_combined = f"{law_name} {content}"
-            
-            # ====== 산업안전보건법 ======
-            if "산업안전보건" in law_name or "산안법" in law_name:
-                if "작업환경측정" in content_combined:
-                    result["작업환경측정"] = "O"
-                if "특수건강진단" in content_combined or "건강진단" in content_combined:
-                    result["특수건강진단"] = "O"
-                if "관리대상" in content_combined:
-                    result["관리대상유해물질"] = "O"
-                if "특별관리" in content_combined:
-                    result["특별관리물질"] = "O"
-                if "허용기준" in content_combined:
-                    result["허용기준설정물질"] = "O"
-            
-            # ====== 위험물안전관리법 ======
-            if "위험물" in law_name:
-                result["위험물류별"], result["위험물품명"], result["지정수량"], result["위험등급"] = parse_hazmat_info(content_combined)
-            
-            # ====== 화학물질관리법 ======
-            if "화학물질관리" in law_name or "화관법" in law_name:
-                if "유독" in content_combined:
-                    result["유독물질"] = "O"
-                if "사고대비" in content_combined:
-                    result["사고대비물질"] = "O"
-                if "제한" in content_combined:
-                    result["제한물질"] = "O"
-                if "금지" in content_combined:
-                    result["금지물질"] = "O"
-        
-        # 직접 텍스트 검색 (백업 로직)
-        if result["위험물류별"] == "-":
-            result["위험물류별"], result["위험물품명"], result["지정수량"], result["위험등급"] = parse_hazmat_from_text(text)
-        
-        return result
-        
-    except Exception as e:
-        print(f"[KOSHA] 법적규제 조회 오류: {e}")
-        return result
+    items = root.findall(".//item")
+    if not items:
+        return {"success": False, "error": "물질 미등록"}
+    
+    results = []
+    for item in items:
+        results.append({
+            "chemId": _get_text(item, "chemId"),
+            "chemNameKor": _get_text(item, "chemNameKor"),
+            "casNo": _get_text(item, "casNo")
+        })
+    
+    return {"success": True, "results": results}
 
 
-def parse_hazmat_info(text):
-    """위험물 정보 파싱"""
-    류별 = "-"
-    품명 = "-"
-    지정수량 = "-"
-    위험등급 = "-"
+# ============================================================
+# 상세 정보 조회
+# ============================================================
+def get_exposure_limits(chem_id: str) -> Dict[str, str]:
+    """
+    노출기준 조회 (8번 항목: 노출방지 및 개인보호구)
     
-    # 류별 추출
-    류별_match = re.search(r'제?([1-6])류', text)
-    if 류별_match:
-        류별 = f"제{류별_match.group(1)}류"
+    Args:
+        chem_id: 화학물질 ID (6자리)
     
-    # 품명 추출
-    품명_keywords = [
-        "특수인화물", "제1석유류", "제2석유류", "제3석유류", "제4석유류",
-        "알코올류", "동식물유류", "산화성고체", "가연성고체",
-        "자연발화성", "금수성", "인화성액체", "자기반응성", "산화성액체",
-        "질산염류", "과염소산염류", "과산화물", "유황", "철분", "마그네슘",
-        "니트로화합물", "유기과산화물", "질산", "황산", "과염소산"
-    ]
-    for keyword in 품명_keywords:
-        if keyword in text:
-            품명 = keyword
-            break
+    Returns:
+        {'twa': '...', 'stel': '...', 'acgih_twa': '...', 'acgih_stel': '...'}
+    """
+    root = _call_api("chemdetail08", {"chemId": chem_id})
     
-    # 수용성/비수용성 구분
-    if "비수용성" in text or "非水溶性" in text:
-        if "석유류" in 품명:
-            품명 = 품명.replace("석유류", "석유류(비수용성)")
-    elif "수용성" in text or "水溶性" in text:
-        if "석유류" in 품명:
-            품명 = 품명.replace("석유류", "석유류(수용성)")
+    result = {"twa": "-", "stel": "-", "acgih_twa": "-", "acgih_stel": "-"}
     
-    # 지정수량 추출
-    지정수량_match = re.search(r'(\d+)\s*(L|ℓ|리터|kg|킬로그램)', text, re.IGNORECASE)
-    if 지정수량_match:
-        지정수량 = f"{지정수량_match.group(1)}{지정수량_match.group(2).upper()}"
-        지정수량 = 지정수량.replace("ℓ", "L").replace("리터", "L").replace("킬로그램", "kg")
-    
-    # 위험등급 추출
-    등급_match = re.search(r'(I{1,3}|Ⅰ|Ⅱ|Ⅲ|1등급|2등급|3등급)', text)
-    if 등급_match:
-        등급_text = 등급_match.group(1)
-        if "1" in 등급_text or 등급_text in ["I", "Ⅰ"]:
-            위험등급 = "I"
-        elif "2" in 등급_text or 등급_text in ["II", "Ⅱ"]:
-            위험등급 = "II"
-        elif "3" in 등급_text or 등급_text in ["III", "Ⅲ"]:
-            위험등급 = "III"
-    
-    # 지정수량으로 위험등급 추정 (백업)
-    if 위험등급 == "-" and 지정수량 != "-":
-        qty = re.search(r'(\d+)', 지정수량)
-        if qty:
-            qty_val = int(qty.group(1))
-            if "L" in 지정수량:
-                if qty_val <= 50:
-                    위험등급 = "I"
-                elif qty_val <= 400:
-                    위험등급 = "II"
-                else:
-                    위험등급 = "III"
-            elif "kg" in 지정수량:
-                if qty_val <= 50:
-                    위험등급 = "I"
-                elif qty_val <= 300:
-                    위험등급 = "II"
-                else:
-                    위험등급 = "III"
-    
-    return 류별, 품명, 지정수량, 위험등급
-
-
-def parse_hazmat_from_text(text):
-    """전체 텍스트에서 위험물 정보 직접 추출"""
-    return parse_hazmat_info(text)
-
-
-def get_full_msds_data(cas_no):
-    """CAS 번호로 전체 MSDS 정보 통합 조회"""
-    result = {
-        "success": False,
-        "cas_no": cas_no,
-        "name_kor": "",
-        "name_eng": "",
-        "chem_id": "",
-        "exposure_limits": {},
-        "legal_regulations": {},
-    }
-    
-    # 1단계: CAS로 검색
-    search_result = search_by_cas(cas_no)
-    if not search_result:
-        result["error"] = "물질을 찾을 수 없습니다"
+    if root is None:
         return result
     
-    chem_id = search_result.get("chemId", "")
-    result["chem_id"] = chem_id
-    result["name_kor"] = search_result.get("chemNameKor", "")
-    result["name_eng"] = search_result.get("chemNameEng", "")
+    items = root.findall(".//item")
+    for item in items:
+        name_kor = _get_text(item, "msdsItemNameKor")
+        detail = _get_text(item, "itemDetail")
+        
+        if not detail or detail in ["자료없음", ""]:
+            continue
+        
+        # 국내규정 TWA/STEL 파싱
+        if "국내규정" in name_kor:
+            if "TWA" in detail.upper():
+                import re
+                twa_match = re.search(r'TWA[:\s]*([^\s,;]+(?:\s*[a-zA-Z/³]+)?)', detail, re.I)
+                if twa_match:
+                    result["twa"] = twa_match.group(1).strip()
+            if "STEL" in detail.upper():
+                import re
+                stel_match = re.search(r'STEL[:\s]*([^\s,;]+(?:\s*[a-zA-Z/³]+)?)', detail, re.I)
+                if stel_match:
+                    result["stel"] = stel_match.group(1).strip()
+            # TWA/STEL 구분 없이 값만 있는 경우
+            if result["twa"] == "-" and ("ppm" in detail or "mg/m" in detail):
+                result["twa"] = detail.split(",")[0].strip()
+        
+        # ACGIH 규정
+        if "ACGIH" in name_kor:
+            if "TWA" in detail.upper():
+                import re
+                twa_match = re.search(r'TWA[:\s]*([^\s,;]+(?:\s*[a-zA-Z/³]+)?)', detail, re.I)
+                if twa_match:
+                    result["acgih_twa"] = twa_match.group(1).strip()
+            if "STEL" in detail.upper():
+                import re
+                stel_match = re.search(r'STEL[:\s]*([^\s,;]+(?:\s*[a-zA-Z/³]+)?)', detail, re.I)
+                if stel_match:
+                    result["acgih_stel"] = stel_match.group(1).strip()
     
-    time.sleep(0.3)  # API 호출 간격
-    
-    # 2단계: 노출기준 (8번)
-    result["exposure_limits"] = get_exposure_limits(chem_id)
-    
-    time.sleep(0.3)
-    
-    # 3단계: 법적규제현황 (15번) - 위험물 정보 포함!
-    result["legal_regulations"] = get_legal_regulations(chem_id)
-    
-    result["success"] = True
     return result
 
 
-# 테스트
-if __name__ == "__main__":
-    test_cas_list = ["67-64-1", "108-88-3", "67-56-1"]
+def get_legal_regulations(chem_id: str) -> Dict[str, str]:
+    """
+    법적 규제현황 조회 (15번 항목)
     
-    for cas in test_cas_list:
-        print(f"\n{'='*50}")
-        print(f"CAS: {cas}")
-        data = get_full_msds_data(cas)
+    Args:
+        chem_id: 화학물질 ID (6자리)
+    
+    Returns:
+        {
+            'measurement': 'O/X',      # 작업환경측정 대상
+            'healthCheck': 'O/X',      # 특수건강진단 대상
+            'managedHazard': 'O/X',    # 관리대상유해물질
+            'specialManaged': 'O/X',   # 특별관리물질
+            'hazmatClass': '-',        # 위험물류별
+            'hazmatName': '-',         # 위험물품명
+            'hazmatQty': '-',          # 지정수량
+            'hazmatGrade': '-',        # 위험등급
+            'toxic': 'O/X',            # 유독물질
+            'accident': 'O/X',         # 사고대비물질
+            'rawText': '...'           # 원본 텍스트
+        }
+    """
+    root = _call_api("chemdetail15", {"chemId": chem_id})
+    
+    result = {
+        "measurement": "X",
+        "healthCheck": "X",
+        "managedHazard": "X",
+        "specialManaged": "X",
+        "hazmatClass": "-",
+        "hazmatName": "-",
+        "hazmatQty": "-",
+        "hazmatGrade": "-",
+        "toxic": "X",
+        "accident": "X",
+        "rawText": ""
+    }
+    
+    if root is None:
+        return result
+    
+    items = root.findall(".//item")
+    raw_texts = []
+    
+    for item in items:
+        name_kor = _get_text(item, "msdsItemNameKor")
+        detail = _get_text(item, "itemDetail")
         
-        if data["success"]:
-            print(f"물질명: {data['name_kor']}")
-            print(f"노출기준(TWA): {data['exposure_limits'].get('TWA', '-')}")
+        if not detail or detail in ["해당없음", "자료없음", ""]:
+            continue
+        
+        # ====== 산업안전보건법 ======
+        if "산업안전보건법" in name_kor:
+            raw_texts.append(detail)
             
-            regs = data["legal_regulations"]
-            print(f"작업환경측정: {regs.get('작업환경측정', 'X')}")
-            print(f"특수건강진단: {regs.get('특수건강진단', 'X')}")
-            print(f"위험물류별: {regs.get('위험물류별', '-')}")
-            print(f"지정수량: {regs.get('지정수량', '-')}")
-            print(f"위험등급: {regs.get('위험등급', '-')}")
+            # 규제 항목 파싱
+            if any(k in detail for k in ["작업환경측정", "측정대상"]):
+                result["measurement"] = "O"
+            if any(k in detail for k in ["특수건강진단", "건강진단"]):
+                result["healthCheck"] = "O"
+            if any(k in detail for k in ["관리대상", "유해물질"]):
+                result["managedHazard"] = "O"
+            if any(k in detail for k in ["특별관리", "발암성", "CMR"]):
+                result["specialManaged"] = "O"
+            
+            # 일반 규제 표시가 있으면 기본 항목 O
+            if detail and result["measurement"] == "X":
+                result["measurement"] = "O"
+                result["healthCheck"] = "O"
+        
+        # ====== 위험물안전관리법 ======
+        if "위험물" in name_kor:
+            raw_texts.append(detail)
+            import re
+            
+            # 류별 추출 (제1류~제6류)
+            class_match = re.search(r'제?([1-6])류', detail)
+            if class_match:
+                result["hazmatClass"] = f"제{class_match.group(1)}류"
+            
+            # 품명 추출
+            hazmat_names = [
+                "특수인화물", "제1석유류", "제2석유류", "제3석유류", "제4석유류",
+                "알코올류", "동식물유류", "산화성고체", "가연성고체",
+                "자연발화성", "금수성", "인화성액체", "자기반응성", "산화성액체",
+                "질산염류", "과염소산염류", "과산화물", "유황", "철분", "마그네슘",
+                "니트로화합물", "유기과산화물", "질산", "황산", "과염소산"
+            ]
+            for hname in hazmat_names:
+                if hname in detail:
+                    result["hazmatName"] = hname
+                    break
+            
+            # 수용성/비수용성 구분
+            if "비수용성" in detail or "非水溶性" in detail:
+                if "석유류" in result["hazmatName"]:
+                    result["hazmatName"] += "(비수용성)"
+            elif "수용성" in detail or "水溶性" in detail:
+                if "석유류" in result["hazmatName"]:
+                    result["hazmatName"] += "(수용성)"
+            
+            # 지정수량 추출
+            qty_match = re.search(r'(\d+)\s*(L|ℓ|리터|kg|킬로그램)', detail, re.IGNORECASE)
+            if qty_match:
+                qty = f"{qty_match.group(1)}{qty_match.group(2).upper()}"
+                result["hazmatQty"] = qty.replace("ℓ", "L").replace("리터", "L").replace("킬로그램", "kg")
+            
+            # 위험등급 추출
+            grade_match = re.search(r'(I{1,3}|Ⅰ|Ⅱ|Ⅲ|1등급|2등급|3등급)', detail)
+            if grade_match:
+                grade_text = grade_match.group(1)
+                if "1" in grade_text or grade_text in ["I", "Ⅰ"]:
+                    result["hazmatGrade"] = "I"
+                elif "2" in grade_text or grade_text in ["II", "Ⅱ"]:
+                    result["hazmatGrade"] = "II"
+                elif "3" in grade_text or grade_text in ["III", "Ⅲ"]:
+                    result["hazmatGrade"] = "III"
+        
+        # ====== 화학물질관리법 ======
+        if "화학물질" in name_kor and "관리법" in name_kor:
+            raw_texts.append(detail)
+            if "유독" in detail:
+                result["toxic"] = "O"
+            if "사고대비" in detail:
+                result["accident"] = "O"
+    
+    result["rawText"] = " | ".join(raw_texts)
+    return result
+
+
+def get_hazard_classification(chem_id: str) -> Dict[str, Any]:
+    """
+    유해성·위험성 분류 조회 (2번 항목)
+    
+    Args:
+        chem_id: 화학물질 ID
+    
+    Returns:
+        {'classification': '...', 'signal': '...', 'pictograms': [...]}
+    """
+    root = _call_api("chemdetail02", {"chemId": chem_id})
+    
+    result = {
+        "classification": "",
+        "signal": "",
+        "pictograms": [],
+        "hazardStatements": [],
+        "precautionStatements": []
+    }
+    
+    if root is None:
+        return result
+    
+    items = root.findall(".//item")
+    for item in items:
+        name_kor = _get_text(item, "msdsItemNameKor")
+        detail = _get_text(item, "itemDetail")
+        
+        if not detail or detail in ["자료없음", ""]:
+            continue
+        
+        if "유해성" in name_kor and "위험성" in name_kor and "분류" in name_kor:
+            result["classification"] = detail
+        elif "신호어" in name_kor:
+            result["signal"] = detail
+        elif "그림문자" in name_kor:
+            result["pictograms"].append(detail)
+        elif "유해" in name_kor and "위험문구" in name_kor:
+            result["hazardStatements"].append(detail)
+        elif "예방조치문구" in name_kor:
+            result["precautionStatements"].append(detail)
+    
+    return result
+
+
+def get_physical_properties(chem_id: str) -> Dict[str, str]:
+    """
+    물리화학적 특성 조회 (9번 항목)
+    
+    Args:
+        chem_id: 화학물질 ID
+    
+    Returns:
+        {'appearance': '...', 'odor': '...', 'pH': '...', ...}
+    """
+    root = _call_api("chemdetail09", {"chemId": chem_id})
+    
+    result = {}
+    
+    if root is None:
+        return result
+    
+    # 항목명 → 키 매핑
+    key_map = {
+        "외관": "appearance",
+        "냄새": "odor",
+        "pH": "pH",
+        "녹는점": "meltingPoint",
+        "끓는점": "boilingPoint",
+        "인화점": "flashPoint",
+        "증기압": "vaporPressure",
+        "비중": "specificGravity",
+        "용해도": "solubility",
+        "분자량": "molecularWeight"
+    }
+    
+    items = root.findall(".//item")
+    for item in items:
+        name_kor = _get_text(item, "msdsItemNameKor")
+        detail = _get_text(item, "itemDetail")
+        
+        if not detail or detail in ["자료없음", ""]:
+            continue
+        
+        for kor_name, eng_key in key_map.items():
+            if kor_name in name_kor:
+                result[eng_key] = detail
+                break
+    
+    return result
+
+
+# ============================================================
+# 통합 조회 함수
+# ============================================================
+def get_chemical_info(cas_no: str) -> Dict[str, Any]:
+    """
+    CAS 번호로 화학물질 정보 통합 조회
+    
+    Args:
+        cas_no: CAS 번호
+    
+    Returns:
+        통합된 화학물질 정보 딕셔너리
+    """
+    # 1. 물질 검색
+    search_result = search_by_cas(cas_no)
+    
+    if not search_result.get("success"):
+        return {
+            "success": False,
+            "casNo": cas_no,
+            "name": "미등록",
+            "error": search_result.get("error", "검색 실패")
+        }
+    
+    chem_id = search_result["chemId"]
+    
+    # 2. 노출기준 조회
+    time.sleep(DELAY)
+    exposure = get_exposure_limits(chem_id)
+    
+    # 3. 법적규제 조회
+    time.sleep(DELAY)
+    regulations = get_legal_regulations(chem_id)
+    
+    return {
+        "success": True,
+        "casNo": cas_no,
+        "chemId": chem_id,
+        "name": search_result.get("chemNameKor", cas_no),
+        "keNo": search_result.get("keNo", ""),
+        "unNo": search_result.get("unNo", ""),
+        "twa": exposure.get("twa", "-"),
+        "stel": exposure.get("stel", "-"),
+        "acgih_twa": exposure.get("acgih_twa", "-"),
+        "acgih_stel": exposure.get("acgih_stel", "-"),
+        "measurement": regulations.get("measurement", "X"),
+        "healthCheck": regulations.get("healthCheck", "X"),
+        "managedHazard": regulations.get("managedHazard", "X"),
+        "specialManaged": regulations.get("specialManaged", "X"),
+        "hazmatClass": regulations.get("hazmatClass", "-"),
+        "hazmatName": regulations.get("hazmatName", "-"),
+        "hazmatQty": regulations.get("hazmatQty", "-"),
+        "hazmatGrade": regulations.get("hazmatGrade", "-"),
+        "toxic": regulations.get("toxic", "X"),
+        "accident": regulations.get("accident", "X")
+    }
+
+
+def get_chemical_info_full(cas_no: str) -> Dict[str, Any]:
+    """
+    CAS 번호로 화학물질 전체 정보 조회 (유해성, 물리적 특성 포함)
+    """
+    basic = get_chemical_info(cas_no)
+    
+    if not basic.get("success"):
+        return basic
+    
+    chem_id = basic["chemId"]
+    
+    # 추가 정보 조회
+    time.sleep(DELAY)
+    hazard = get_hazard_classification(chem_id)
+    
+    time.sleep(DELAY)
+    physical = get_physical_properties(chem_id)
+    
+    return {
+        **basic,
+        "hazardClassification": hazard.get("classification", ""),
+        "signal": hazard.get("signal", ""),
+        "pictograms": hazard.get("pictograms", []),
+        "physicalProperties": physical
+    }
+
+
+def batch_query(cas_list: List[str], full_info: bool = False) -> List[Dict[str, Any]]:
+    """
+    여러 CAS 번호 일괄 조회
+    
+    Args:
+        cas_list: CAS 번호 리스트
+        full_info: True면 전체 정보 조회
+    
+    Returns:
+        조회 결과 리스트
+    """
+    results = []
+    total = len(cas_list)
+    
+    for i, cas in enumerate(cas_list):
+        print(f"[{i+1}/{total}] {cas} 조회 중...")
+        
+        if full_info:
+            info = get_chemical_info_full(cas)
         else:
-            print(f"오류: {data.get('error', '알 수 없음')}")
+            info = get_chemical_info(cas)
+        
+        results.append(info)
+        
+        if i < total - 1:
+            time.sleep(DELAY)
+    
+    return results
+
+
+# ============================================================
+# CLI
+# ============================================================
+def main():
+    parser = argparse.ArgumentParser(description="KOSHA MSDS API 조회")
+    parser.add_argument("--api-key", help="KOSHA API 키")
+    parser.add_argument("--cas", help="조회할 CAS 번호")
+    parser.add_argument("--cas-list", help="조회할 CAS 번호 목록 (쉼표 구분)")
+    parser.add_argument("--name", help="조회할 물질명")
+    parser.add_argument("--full", action="store_true", help="전체 정보 조회")
+    parser.add_argument("--output", "-o", help="결과 저장 파일 (JSON)")
+    
+    args = parser.parse_args()
+    
+    if args.api_key:
+        set_api_key(args.api_key)
+    
+    results = []
+    
+    if args.cas:
+        if args.full:
+            results = [get_chemical_info_full(args.cas)]
+        else:
+            results = [get_chemical_info(args.cas)]
+    
+    elif args.cas_list:
+        cas_list = [c.strip() for c in args.cas_list.split(",")]
+        results = batch_query(cas_list, full_info=args.full)
+    
+    elif args.name:
+        results = [search_by_name(args.name)]
+    
+    else:
+        parser.print_help()
+        return
+    
+    # 출력
+    output = json.dumps(results, ensure_ascii=False, indent=2)
+    print(output)
+    
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output)
+        print(f"\n결과 저장: {args.output}")
+
+
+if __name__ == "__main__":
+    main()

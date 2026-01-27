@@ -351,15 +351,30 @@ with tab1:
         st.success(f"✅ **{uploaded_file.name}** 업로드됨")
         
         try:
-            # 전체 행 읽기 (빈 행 포함, 중간에 끊기지 않도록)
-            df = pd.read_excel(
-                uploaded_file, 
-                header=0, 
-                skiprows=[1],  # 2행(세부헤더) 스킵
-                engine='openpyxl',
-                dtype=str,  # 모든 컬럼을 문자열로 읽기
-                keep_default_na=False  # 빈 셀을 NaN 대신 빈 문자열로
-            )
+            # openpyxl iter_rows로 빠르게 전체 읽기
+            from openpyxl import load_workbook
+            import io
+            
+            wb = load_workbook(io.BytesIO(uploaded_file.read()), read_only=True, data_only=True)
+            ws = wb.active
+            
+            # 헤더 읽기 (1행)
+            headers = []
+            for cell in ws[1]:
+                headers.append(str(cell.value) if cell.value else f"Col_{len(headers)+1}")
+            
+            # 데이터 읽기 (3행부터 - 2행은 세부헤더라 스킵)
+            data_rows = []
+            for row in ws.iter_rows(min_row=3, values_only=True):
+                row_dict = {headers[i]: row[i] for i in range(min(len(headers), len(row)))}
+                data_rows.append(row_dict)
+            
+            wb.close()
+            
+            df = pd.DataFrame(data_rows)
+            
+            # 완전히 빈 행 제거
+            df = df.dropna(how='all')
             
             with st.expander("📊 미리보기", expanded=True):
                 st.dataframe(df.head(10), use_container_width=True)
@@ -388,19 +403,28 @@ with tab1:
                 total_rows = len(df)
                 
                 for idx, row in df.iterrows():
-                    cas = str(row.get(cas_col, '')).strip()
+                    # CAS 값 가져오기 (None 처리)
+                    cas_val = row[cas_col] if cas_col in row.index else None
+                    cas = str(cas_val).strip() if cas_val is not None and str(cas_val).strip() not in ['', 'None', 'nan'] else ''
                     
-                    # CAS 번호 없으면 skip (중복 CAS는 허용 - 제품/공정별로 다를 수 있음)
+                    # CAS 번호 없으면 skip
                     if not cas:
                         skip += 1
                         progress.progress(min((success + skip) / total_rows, 1.0))
                         continue
                     
-                    chem_name = str(row.get(name_col, '')).strip() if name_col != '(자동조회)' else ''
-                    process = str(row.get(process_col, '')).strip() if process_col != '(없음)' else ''
-                    unit_wp = str(row.get(unit_col, '')).strip() if unit_col != '(없음)' else ''
-                    product = str(row.get(product_col, '')).strip() if product_col != '(없음)' else ''
-                    content = str(row.get(content_col, '')).strip() if content_col != '(없음)' else ''
+                    # 다른 컬럼 값 가져오기
+                    def get_val(col_name):
+                        if col_name in ['(없음)', '(자동조회)']:
+                            return ''
+                        val = row[col_name] if col_name in row.index else None
+                        return str(val).strip() if val is not None and str(val).strip() not in ['', 'None', 'nan'] else ''
+                    
+                    chem_name = get_val(name_col) if name_col != '(자동조회)' else ''
+                    process = get_val(process_col)
+                    unit_wp = get_val(unit_col)
+                    product = get_val(product_col)
+                    content = get_val(content_col)
                     
                     kosha_data, keco_data, prtr_status = None, None, None
                     
@@ -434,6 +458,8 @@ with tab1:
         
         except Exception as e:
             st.error(f"❌ 파일 읽기 오류: {e}")
+            import traceback
+            st.code(traceback.format_exc())
 
 # ============================================
 # 탭 2: 개별 등록

@@ -385,13 +385,13 @@ with tab1:
                 status = st.empty()
                 
                 success, skip, hazmat_count = 0, 0, 0
-                existing_cas = [i['CAS No'] for i in st.session_state.inventory]
                 total_rows = len(df)
                 
                 for idx, row in df.iterrows():
                     cas = str(row.get(cas_col, '')).strip()
                     
-                    if not cas or cas in existing_cas:
+                    # CAS 번호 없으면 skip (중복 CAS는 허용 - 제품/공정별로 다를 수 있음)
+                    if not cas:
                         skip += 1
                         progress.progress(min((success + skip) / total_rows, 1.0))
                         continue
@@ -424,7 +424,6 @@ with tab1:
                         hazmat_count += 1
                     
                     st.session_state.inventory.append(item)
-                    existing_cas.append(cas)
                     success += 1
                     progress.progress(min((success + skip) / total_rows, 1.0))
                 

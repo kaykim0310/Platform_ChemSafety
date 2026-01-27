@@ -351,15 +351,15 @@ with tab1:
         st.success(f"✅ **{uploaded_file.name}** 업로드됨")
         
         try:
-            # pandas로 읽기 (빠름) - 2행 헤더 스킵, 빈 행 유지
-            df = pd.read_excel(uploaded_file, header=0, skiprows=[1], engine='openpyxl')
-            
-            # CAS 번호 컬럼 찾기
-            cas_candidates = [c for c in df.columns if 'cas' in c.lower() or 'CAS' in c]
-            if cas_candidates:
-                # CAS 번호가 있는 행만 필터링 (빈 행 제거)
-                cas_col_name = cas_candidates[0]
-                df = df[df[cas_col_name].notna() & (df[cas_col_name].astype(str).str.strip() != '')]
+            # 전체 행 읽기 (빈 행 포함, 중간에 끊기지 않도록)
+            df = pd.read_excel(
+                uploaded_file, 
+                header=0, 
+                skiprows=[1],  # 2행(세부헤더) 스킵
+                engine='openpyxl',
+                dtype=str,  # 모든 컬럼을 문자열로 읽기
+                keep_default_na=False  # 빈 셀을 NaN 대신 빈 문자열로
+            )
             
             with st.expander("📊 미리보기", expanded=True):
                 st.dataframe(df.head(10), use_container_width=True)
@@ -369,6 +369,7 @@ with tab1:
             
             col1, col2 = st.columns(2)
             with col1:
+                cas_candidates = [c for c in df.columns if 'cas' in c.lower() or 'CAS' in c]
                 cas_col = st.selectbox("CAS 번호 컬럼", cas_candidates if cas_candidates else list(df.columns))
                 name_col = st.selectbox("화학물질명 컬럼", ['(자동조회)'] + list(df.columns))
             with col2:
@@ -376,14 +377,6 @@ with tab1:
                 unit_col = st.selectbox("단위작업장소 컬럼", ['(없음)'] + list(df.columns))
                 product_col = st.selectbox("제품명 컬럼", ['(없음)'] + list(df.columns))
                 content_col = st.selectbox("함유량 컬럼", ['(없음)'] + list(df.columns))
-            
-            # API 조회 옵션 분리
-            st.markdown("##### 🔌 API 조회 옵션")
-            col_api1, col_api2 = st.columns(2)
-            with col_api1:
-                use_kosha = st.checkbox("KOSHA API (노출기준/측정대상/위험물)", value=True)
-            with col_api2:
-                use_keco = st.checkbox("KECO API (유독/사고대비)", value=True)
             
             st.divider()
             
@@ -396,27 +389,23 @@ with tab1:
                 total_rows = len(df)
                 
                 for idx, row in df.iterrows():
-                    cas = str(row.get(cas_col, '')).strip() if row.get(cas_col) else ''
+                    cas = str(row.get(cas_col, '')).strip()
                     
-                    if not cas or cas == 'nan' or cas == 'None' or cas in existing_cas:
+                    if not cas or cas in existing_cas:
                         skip += 1
                         progress.progress(min((success + skip) / total_rows, 1.0))
                         continue
                     
-                    chem_name = str(row.get(name_col, '')) if name_col != '(자동조회)' and row.get(name_col) else ''
-                    process = str(row.get(process_col, '')) if process_col != '(없음)' and row.get(process_col) else ''
-                    unit_wp = str(row.get(unit_col, '')) if unit_col != '(없음)' and row.get(unit_col) else ''
-                    product = str(row.get(product_col, '')) if product_col != '(없음)' and row.get(product_col) else ''
-                    content = str(row.get(content_col, '')) if content_col != '(없음)' and row.get(content_col) else ''
-                    
-                    # nan/None 정리
-                    for val in [chem_name, process, unit_wp, product, content]:
-                        val = '' if val in ['nan', 'None'] else val
+                    chem_name = str(row.get(name_col, '')).strip() if name_col != '(자동조회)' else ''
+                    process = str(row.get(process_col, '')).strip() if process_col != '(없음)' else ''
+                    unit_wp = str(row.get(unit_col, '')).strip() if unit_col != '(없음)' else ''
+                    product = str(row.get(product_col, '')).strip() if product_col != '(없음)' else ''
+                    content = str(row.get(content_col, '')).strip() if content_col != '(없음)' else ''
                     
                     kosha_data, keco_data, prtr_status = None, None, None
                     
-                    # KOSHA API
-                    if use_kosha and KOSHA_AVAILABLE:
+                    # KOSHA API (고용노동부)
+                    if KOSHA_AVAILABLE:
                         status.text(f"[{success+skip+1}/{total_rows}] KOSHA: {cas}")
                         kosha_data, _ = query_chemical_info(cas)
                         try:
@@ -424,8 +413,8 @@ with tab1:
                         except:
                             pass
                     
-                    # KECO API
-                    if use_keco and KECO_AVAILABLE:
+                    # KECO API (환경부)
+                    if KECO_AVAILABLE:
                         status.text(f"[{success+skip+1}/{total_rows}] KECO: {cas}")
                         keco_data = get_chemical_regulations(cas)
                     

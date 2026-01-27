@@ -23,6 +23,12 @@ try:
 except ImportError:
     KOSHA_AVAILABLE = False
 
+try:
+    from core.keco_api import get_chemical_regulations
+    KECO_AVAILABLE = True
+except ImportError:
+    KECO_AVAILABLE = False
+
 # ============================================
 # 페이지 설정
 # ============================================
@@ -74,8 +80,8 @@ def query_chemical_info(cas_no):
     except Exception as e:
         return None, f"API 오류: {str(e)[:50]}"
 
-def create_inventory_item(process_name, unit_workplace, product_name, chem_name, alias, cas_no, content, kosha_data=None, prtr_status=None):
-    """인벤토리 항목 생성 - KOSHA API에서 규제정보+위험물 정보 추출"""
+def create_inventory_item(process_name, unit_workplace, product_name, chem_name, alias, cas_no, content, kosha_data=None, keco_data=None, prtr_status=None):
+    """인벤토리 항목 생성 - KOSHA API + KECO API 연동"""
     item = {
         '공정명': process_name or '',
         '단위작업장소': unit_workplace or '',
@@ -86,18 +92,18 @@ def create_inventory_item(process_name, unit_workplace, product_name, chem_name,
         '함유량(%)': content or '',
         # 독성정보
         '발암성': '-', '변이성': '-', '생식독성': '-', '노출기준(TWA)': '-',
-        # 산안법 규제
+        # 산안법 규제 (KOSHA)
         '작업환경측정': 'X', '특수건강진단': 'X', '관리대상유해물질': 'X', '특별관리물질': 'X',
-        # 위험물 (KOSHA 15번에서!)
+        # 위험물 (KOSHA 15번)
         '위험물류별': '-', '지정수량': '-', '위험등급': '-',
-        # 환경부
+        # 환경부 규제 (KECO)
         '기존': '-', '급성·만성·생태': 'X', '사고대비': 'X', '제한/금지/허가': '-',
         '중점': '-', '잔류': '-', '함량 및 규제정보': '-', '등록대상기존화학물질': '-', '기존물질여부': '-',
         # PRTR
         'PRTR그룹': '-', 'PRTR기준량': '-'
     }
     
-    # KOSHA API 데이터 적용
+    # ========== KOSHA API 데이터 (고용노동부) ==========
     if kosha_data:
         # 물질명
         item['화학물질명'] = kosha_data.get('name', chem_name) or chem_name
@@ -111,7 +117,7 @@ def create_inventory_item(process_name, unit_workplace, product_name, chem_name,
         item['관리대상유해물질'] = kosha_data.get('managedHazard', 'X')
         item['특별관리물질'] = kosha_data.get('specialManaged', 'X')
         
-        # ⭐ 15번 항목: 위험물안전관리법
+        # 15번 항목: 위험물안전관리법
         hazmat_class = kosha_data.get('hazmatClass', '-')
         hazmat_name = kosha_data.get('hazmatName', '-')
         if hazmat_class != '-' and hazmat_name != '-':
@@ -120,12 +126,63 @@ def create_inventory_item(process_name, unit_workplace, product_name, chem_name,
             item['위험물류별'] = hazmat_class
         item['지정수량'] = kosha_data.get('hazmatQty', '-')
         item['위험등급'] = kosha_data.get('hazmatGrade', '-')
-        
-        # 화관법
-        item['급성·만성·생태'] = kosha_data.get('toxic', 'X')
-        item['사고대비'] = kosha_data.get('accident', 'X')
     
-    # PRTR 정보
+    # ========== KECO API 데이터 (환경부) ==========
+    if keco_data and keco_data.get('success'):
+        # 기존화학물질
+        existing = keco_data.get('기존화학물질', '-')
+        if existing and existing != '-':
+            item['기존'] = 'O'
+            item['기존물질여부'] = 'O'
+        
+        # 급성·만성·생태 (유독물질 또는 인체유해성물질)
+        toxic = keco_data.get('유독물질', '-')
+        human_hazard = keco_data.get('인체유해성물질', '-')
+        if toxic and toxic != '-':
+            item['급성·만성·생태'] = toxic  # "O(1%이상)" 형태
+        elif human_hazard and human_hazard != '-':
+            item['급성·만성·생태'] = human_hazard  # "O(급성1%/만성0.1%)" 형태
+        
+        # 사고대비물질
+        accident = keco_data.get('사고대비물질', '-')
+        if accident and accident != '-':
+            item['사고대비'] = accident
+        
+        # 제한/금지/허가
+        restricted = keco_data.get('제한물질', '-')
+        prohibited = keco_data.get('금지물질', '-')
+        permitted = keco_data.get('허가물질', '-')
+        reg_list = []
+        if restricted and restricted != '-':
+            reg_list.append(f"제한{restricted.replace('O', '')}")
+        if prohibited and prohibited != '-':
+            reg_list.append(f"금지{prohibited.replace('O', '')}")
+        if permitted and permitted != '-':
+            reg_list.append(f"허가{permitted.replace('O', '')}")
+        if reg_list:
+            item['제한/금지/허가'] = ','.join(reg_list) if reg_list else '-'
+        
+        # 중점관리물질
+        priority = keco_data.get('중점관리물질', '-')
+        if priority and priority != '-':
+            item['중점'] = priority
+        
+        # 등록대상기존화학물질
+        reg_existing = keco_data.get('등록대상기존화학물질', '-')
+        if reg_existing and reg_existing != '-':
+            item['등록대상기존화학물질'] = 'O'
+        
+        # 함량 및 규제정보 (details에서 추출)
+        details = keco_data.get('details', {})
+        if details:
+            info_list = []
+            for k, v in details.items():
+                if '함량' in k:
+                    info_list.append(v)
+            if info_list:
+                item['함량 및 규제정보'] = '; '.join(info_list[:2])  # 최대 2개
+    
+    # ========== PRTR 정보 ==========
     if prtr_status and prtr_status.get('대상여부') == 'O':
         item['PRTR그룹'] = prtr_status.get('그룹', '-')
         item['PRTR기준량'] = prtr_status.get('기준취급량', '-')
@@ -259,9 +316,9 @@ with st.sidebar:
     
     st.divider()
     st.markdown("#### 🔌 데이터 소스")
-    st.caption("✅ KOSHA API (8번: 노출기준)")
-    st.caption("✅ KOSHA API (15번: 법적규제+위험물)")
-    st.caption("✅ PRTR DB (배출량조사)")
+    st.caption(f"KOSHA API: {'✅' if KOSHA_AVAILABLE else '❌'} (고용노동부)")
+    st.caption(f"KECO API: {'✅' if KECO_AVAILABLE else '❌'} (환경부)")
+    st.caption("PRTR DB: ✅ (배출량조사)")
     
     st.divider()
     if st.button("🗑️ 전체 삭제", use_container_width=True):
@@ -344,17 +401,24 @@ with tab1:
                     product = '' if product == 'nan' else product
                     content = '' if content == 'nan' else content
                     
-                    kosha_data, prtr_status = None, None
+                    kosha_data, keco_data, prtr_status = None, None, None
                     
-                    if auto_query and KOSHA_AVAILABLE:
-                        status.text(f"KOSHA 조회 중: {cas}...")
-                        kosha_data, _ = query_chemical_info(cas)
-                        try:
-                            prtr_status = check_prtr_status(cas)
-                        except:
-                            prtr_status = None
+                    if auto_query:
+                        # KOSHA API (고용노동부)
+                        if KOSHA_AVAILABLE:
+                            status.text(f"KOSHA 조회 중: {cas}...")
+                            kosha_data, _ = query_chemical_info(cas)
+                            try:
+                                prtr_status = check_prtr_status(cas)
+                            except:
+                                prtr_status = None
+                        
+                        # KECO API (환경부)
+                        if KECO_AVAILABLE:
+                            status.text(f"KECO 조회 중: {cas}...")
+                            keco_data = get_chemical_regulations(cas)
                     
-                    item = create_inventory_item(process, unit_wp, product, chem_name, '', cas, content, kosha_data, prtr_status)
+                    item = create_inventory_item(process, unit_wp, product, chem_name, '', cas, content, kosha_data, keco_data, prtr_status)
                     
                     # 위험물 카운트
                     if item.get('위험물류별', '-') != '-':
@@ -392,19 +456,34 @@ with tab2:
         💡 **KOSHA API 자동 조회 항목:**
         - 8번: 노출기준 (TWA, STEL)
         - 15번: 법적규제 + **위험물** 정보
+        
+        **KECO API (환경부):**
+        - 유독물질, 사고대비, 제한/금지 등
         """)
     
     if st.button("🔍 조회 및 등록", type="primary", use_container_width=True):
         if cas:
-            with st.spinner("KOSHA API 조회 중..."):
+            with st.spinner("API 조회 중..."):
+                # KOSHA API
                 kosha_data, err = query_chemical_info(cas.strip())
                 try:
                     prtr_status = check_prtr_status(cas.strip())
                 except:
                     prtr_status = None
+                
+                # KECO API
+                keco_data = None
+                if KECO_AVAILABLE:
+                    keco_data = get_chemical_regulations(cas.strip())
             
-            if kosha_data:
-                item = create_inventory_item(process, unit_wp, product, kosha_data.get('name',''), alias, cas.strip(), content, kosha_data, prtr_status)
+            if kosha_data or (keco_data and keco_data.get('success')):
+                chem_name_final = ''
+                if kosha_data:
+                    chem_name_final = kosha_data.get('name', '')
+                elif keco_data:
+                    chem_name_final = keco_data.get('물질명', '')
+                
+                item = create_inventory_item(process, unit_wp, product, chem_name_final, alias, cas.strip(), content, kosha_data, keco_data, prtr_status)
                 
                 if cas.strip() not in [i['CAS No'] for i in st.session_state.inventory]:
                     st.session_state.inventory.append(item)
@@ -414,8 +493,8 @@ with tab2:
                     col_a, col_b, col_c, col_d = st.columns(4)
                     col_a.metric("노출기준(TWA)", item['노출기준(TWA)'])
                     col_b.metric("작업환경측정", item['작업환경측정'])
-                    col_c.metric("위험물류별", item['위험물류별'])
-                    col_d.metric("지정수량", item['지정수량'])
+                    col_c.metric("급성·만성·생태", item['급성·만성·생태'])
+                    col_d.metric("위험물류별", item['위험물류별'])
                     
                     st.rerun()
                 else:

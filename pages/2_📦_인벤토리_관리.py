@@ -344,6 +344,7 @@ with tab1:
     st.subheader("📤 엑셀 파일 업로드")
     
     st.markdown('<div class="upload-box"><h4>📁 엑셀 파일을 업로드하세요</h4></div>', unsafe_allow_html=True)
+    st.warning("⚠️ **API 호출 제한**: 한 번에 최대 **300건**까지 처리됩니다. 대용량 파일은 여러 번 나눠서 등록해주세요.")
     
     uploaded_file = st.file_uploader("엑셀 파일 선택", type=['xlsx', 'xls'])
     
@@ -393,68 +394,100 @@ with tab1:
                 product_col = st.selectbox("제품명 컬럼", ['(없음)'] + list(df.columns))
                 content_col = st.selectbox("함유량 컬럼", ['(없음)'] + list(df.columns))
             
-            st.divider()
+            # 배치 크기 설정
+            batch_size = st.number_input("배치 크기 (한 번에 처리할 행 수)", min_value=50, max_value=500, value=300, step=50)
             
-            if st.button("🚀 일괄 등록", type="primary", use_container_width=True):
-                progress = st.progress(0)
-                status = st.empty()
-                
-                success, skip, hazmat_count = 0, 0, 0
-                total_rows = len(df)
-                
-                for idx, row in df.iterrows():
-                    # CAS 값 가져오기 (None 처리)
-                    cas_val = row[cas_col] if cas_col in row.index else None
-                    cas = str(cas_val).strip() if cas_val is not None and str(cas_val).strip() not in ['', 'None', 'nan'] else ''
+            # 이미 처리된 행 수 추적
+            if 'processed_rows' not in st.session_state:
+                st.session_state.processed_rows = 0
+            
+            remaining = len(df) - st.session_state.processed_rows
+            st.info(f"📊 총 {len(df)}행 중 **{st.session_state.processed_rows}행 처리 완료**, 남은 행: **{remaining}행**")
+            
+            col_btn1, col_btn2 = st.columns(2)
+            
+            with col_btn1:
+                if st.button(f"🚀 다음 {min(batch_size, remaining)}건 등록", type="primary", use_container_width=True, disabled=(remaining == 0)):
+                    progress = st.progress(0)
+                    status = st.empty()
                     
-                    # CAS 번호 없으면 skip
-                    if not cas:
-                        skip += 1
-                        progress.progress(min((success + skip) / total_rows, 1.0))
-                        continue
+                    success, skip, hazmat_count = 0, 0, 0
+                    start_idx = st.session_state.processed_rows
+                    end_idx = min(start_idx + batch_size, len(df))
+                    batch_total = end_idx - start_idx
                     
-                    # 다른 컬럼 값 가져오기
-                    def get_val(col_name):
-                        if col_name in ['(없음)', '(자동조회)']:
-                            return ''
-                        val = row[col_name] if col_name in row.index else None
-                        return str(val).strip() if val is not None and str(val).strip() not in ['', 'None', 'nan'] else ''
+                    batch_df = df.iloc[start_idx:end_idx]
                     
-                    chem_name = get_val(name_col) if name_col != '(자동조회)' else ''
-                    process = get_val(process_col)
-                    unit_wp = get_val(unit_col)
-                    product = get_val(product_col)
-                    content = get_val(content_col)
-                    
-                    kosha_data, keco_data, prtr_status = None, None, None
-                    
-                    # KOSHA API (고용노동부)
-                    if KOSHA_AVAILABLE:
-                        status.text(f"[{success+skip+1}/{total_rows}] KOSHA: {cas}")
-                        kosha_data, _ = query_chemical_info(cas)
+                    for i, (idx, row) in enumerate(batch_df.iterrows()):
                         try:
-                            prtr_status = check_prtr_status(cas)
-                        except:
-                            pass
+                            # CAS 값 가져오기
+                            cas_val = row[cas_col] if cas_col in row.index else None
+                            cas = str(cas_val).strip() if cas_val is not None and str(cas_val).strip() not in ['', 'None', 'nan'] else ''
+                            
+                            if not cas:
+                                skip += 1
+                                progress.progress((i + 1) / batch_total)
+                                continue
+                            
+                            def get_val(col_name):
+                                if col_name in ['(없음)', '(자동조회)']:
+                                    return ''
+                                val = row[col_name] if col_name in row.index else None
+                                return str(val).strip() if val is not None and str(val).strip() not in ['', 'None', 'nan'] else ''
+                            
+                            chem_name = get_val(name_col) if name_col != '(자동조회)' else ''
+                            process = get_val(process_col)
+                            unit_wp = get_val(unit_col)
+                            product = get_val(product_col)
+                            content = get_val(content_col)
+                            
+                            kosha_data, keco_data, prtr_status = None, None, None
+                            
+                            if KOSHA_AVAILABLE:
+                                status.text(f"[{i+1}/{batch_total}] KOSHA: {cas}")
+                                kosha_data, _ = query_chemical_info(cas)
+                                try:
+                                    prtr_status = check_prtr_status(cas)
+                                except:
+                                    pass
+                            
+                            if KECO_AVAILABLE:
+                                status.text(f"[{i+1}/{batch_total}] KECO: {cas}")
+                                keco_data = get_chemical_regulations(cas)
+                            
+                            item = create_inventory_item(process, unit_wp, product, chem_name, '', cas, content, kosha_data, keco_data, prtr_status)
+                            
+                            if item.get('위험물류별', '-') != '-':
+                                hazmat_count += 1
+                            
+                            st.session_state.inventory.append(item)
+                            success += 1
+                            progress.progress((i + 1) / batch_total)
+                        
+                        except Exception as e:
+                            status.empty()
+                            progress.empty()
+                            st.error(f"❌ 오류 발생! (행: {start_idx + i + 3}, CAS: {cas_val})")
+                            st.code(str(e))
+                            st.stop()
                     
-                    # KECO API (환경부)
-                    if KECO_AVAILABLE:
-                        status.text(f"[{success+skip+1}/{total_rows}] KECO: {cas}")
-                        keco_data = get_chemical_regulations(cas)
+                    st.session_state.processed_rows = end_idx
+                    status.empty()
+                    progress.empty()
                     
-                    item = create_inventory_item(process, unit_wp, product, chem_name, '', cas, content, kosha_data, keco_data, prtr_status)
-                    
-                    if item.get('위험물류별', '-') != '-':
-                        hazmat_count += 1
-                    
-                    st.session_state.inventory.append(item)
-                    success += 1
-                    progress.progress(min((success + skip) / total_rows, 1.0))
-                
-                status.empty()
-                progress.empty()
-                st.success(f"✅ 등록 완료! 성공: **{success}건**, 건너뜀: {skip}건, 위험물: {hazmat_count}종")
-                st.rerun()
+                    remaining_after = len(df) - st.session_state.processed_rows
+                    if remaining_after > 0:
+                        st.success(f"✅ 배치 완료! 성공: {success}건, 건너뜀(CAS없음): {skip}건, 위험물: {hazmat_count}종 | 남은 행: **{remaining_after}건**")
+                    else:
+                        st.success(f"🎉 전체 완료! 총 등록: **{len(st.session_state.inventory)}종**, 건너뜀: {skip}건, 위험물: {hazmat_count}종")
+                        st.session_state.processed_rows = 0
+                    st.rerun()
+            
+            with col_btn2:
+                if st.button("🔄 처음부터 다시", use_container_width=True):
+                    st.session_state.processed_rows = 0
+                    st.session_state.inventory = []
+                    st.rerun()
         
         except Exception as e:
             st.error(f"❌ 파일 읽기 오류: {e}")

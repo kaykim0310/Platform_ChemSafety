@@ -349,16 +349,31 @@ with tab1:
             wb = load_workbook(io.BytesIO(uploaded_file.read()), read_only=True, data_only=True)
             ws = wb.active
             
-            # 헤더 읽기 (1행)
+            # 헤더 읽기 - 1행과 2행 모두 확인 (병합셀 처리)
             headers = []
-            for cell in ws[1]:
-                headers.append(str(cell.value) if cell.value else f"Col_{len(headers)+1}")
+            row1_cells = list(ws[1])
+            row2_cells = list(ws[2])
             
-            # 데이터 읽기 (3행부터 - 2행은 세부헤더라 스킵)
+            for i in range(len(row1_cells)):
+                val1 = row1_cells[i].value
+                val2 = row2_cells[i].value if i < len(row2_cells) else None
+                
+                # 1행 값이 있으면 1행 사용, 없으면 2행 사용
+                if val1 and str(val1).strip():
+                    headers.append(str(val1).strip())
+                elif val2 and str(val2).strip():
+                    headers.append(str(val2).strip())
+                else:
+                    headers.append(f"Col_{i+1}")
+            
+            # 데이터 읽기 (3행부터)
             data_rows = []
             for row in ws.iter_rows(min_row=3, values_only=True):
-                row_dict = {headers[i]: row[i] for i in range(min(len(headers), len(row)))}
-                data_rows.append(row_dict)
+                if row and any(cell is not None for cell in row):
+                    row_dict = {}
+                    for i in range(min(len(headers), len(row))):
+                        row_dict[headers[i]] = row[i]
+                    data_rows.append(row_dict)
             
             wb.close()
             
@@ -400,10 +415,20 @@ with tab1:
                 product_options = ['(없음)'] + list(df.columns)
                 content_options = ['(없음)'] + list(df.columns)
                 
-                process_col = st.selectbox("공정명 컬럼", process_options, index=process_options.index(auto_process) if auto_process else 0)
-                unit_col = st.selectbox("단위작업장소 컬럼", unit_options, index=unit_options.index(auto_unit) if auto_unit else 0)
-                product_col = st.selectbox("제품명 컬럼", product_options, index=product_options.index(auto_product) if auto_product else 0)
-                content_col = st.selectbox("함유량 컬럼", content_options, index=content_options.index(auto_content) if auto_content else 0)
+                # 자동 매칭된 컬럼이 있으면 해당 index, 없으면 0 (없음)
+                process_idx = process_options.index(auto_process) if auto_process and auto_process in process_options else 0
+                unit_idx = unit_options.index(auto_unit) if auto_unit and auto_unit in unit_options else 0
+                product_idx = product_options.index(auto_product) if auto_product and auto_product in product_options else 0
+                content_idx = content_options.index(auto_content) if auto_content and auto_content in content_options else 0
+                
+                process_col = st.selectbox("공정명 컬럼", process_options, index=process_idx)
+                unit_col = st.selectbox("단위작업장소 컬럼", unit_options, index=unit_idx)
+                product_col = st.selectbox("제품명 컬럼", product_options, index=product_idx)
+                content_col = st.selectbox("함유량 컬럼", content_options, index=content_idx)
+            
+            # 자동 매칭 결과 표시
+            if auto_process or auto_unit or auto_product:
+                st.success(f"✅ 자동 매칭: 공정명={auto_process or '없음'}, 단위작업장소={auto_unit or '없음'}, 제품명={auto_product or '없음'}, 함유량={auto_content or '없음'}")
             
             # 배치 크기 설정
             batch_size = st.number_input("배치 크기 (한 번에 처리할 행 수)", min_value=50, max_value=500, value=300, step=50)
@@ -444,14 +469,20 @@ with tab1:
                             def get_val(col_name):
                                 if col_name in ['(없음)', '(자동조회)']:
                                     return ''
-                                val = row[col_name] if col_name in row.index else None
-                                return str(val).strip() if val is not None and str(val).strip() not in ['', 'None', 'nan'] else ''
+                                try:
+                                    val = row.get(col_name) if hasattr(row, 'get') else row[col_name]
+                                    if val is None:
+                                        return ''
+                                    val_str = str(val).strip()
+                                    return '' if val_str in ['', 'None', 'nan'] else val_str
+                                except:
+                                    return ''
                             
                             chem_name = get_val(name_col) if name_col != '(자동조회)' else ''
-                            process = get_val(process_col)
-                            unit_wp = get_val(unit_col)
-                            product = get_val(product_col)
-                            content = get_val(content_col)
+                            process = get_val(process_col) if process_col != '(없음)' else ''
+                            unit_wp = get_val(unit_col) if unit_col != '(없음)' else ''
+                            product = get_val(product_col) if product_col != '(없음)' else ''
+                            content = get_val(content_col) if content_col != '(없음)' else ''
                             
                             kosha_data, keco_data, prtr_status = None, None, None
                             
